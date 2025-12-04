@@ -1,0 +1,7 @@
+data/
+bin/
+.git/
+.gitignore
+*.md
+test/
+.vscode/
