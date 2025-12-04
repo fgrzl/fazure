@@ -7,12 +7,7 @@ services:
     ports:
       - "10000:10000"
     environment:
-      - PORT=10000
       - DATA_DIR=/data
     volumes:
       - fazure-data:/data
     restart: unless-stopped
-
-volumes:
-  fazure-data:
-    driver: local

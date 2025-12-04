@@ -28,7 +28,7 @@ func main() {
 
 	datadir := os.Getenv("DATA_DIR")
 	if datadir == "" {
-		datadir = filepath.Join(os.TempDir(), "fauxtable")
+		datadir = filepath.Join(os.TempDir(), "data")
 	}
 
 	// Initialize shared Pebble store

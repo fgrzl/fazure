@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/fgrzl/fazure/internal/common"
 )
 
 var globalStore *TableStore
@@ -98,10 +100,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 func ListTables(w http.ResponseWriter, r *http.Request) {
 	tables, err := globalStore.ListTables(context.Background())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("InternalServerError: %v", err), http.StatusInternalServerError)
+		common.WriteErrorResponse(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 		return
 	}
 
+	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]interface{}{
 		"value": tables,
@@ -116,25 +119,26 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "InvalidInput", http.StatusBadRequest)
+		common.WriteErrorResponse(w, http.StatusBadRequest, "InvalidInput", "Invalid request body")
 		return
 	}
 
 	if req.TableName == "" {
-		http.Error(w, "InvalidInput: TableName required", http.StatusBadRequest)
+		common.WriteErrorResponse(w, http.StatusBadRequest, "InvalidInput", "TableName required")
 		return
 	}
 
 	err := globalStore.CreateTable(context.Background(), req.TableName)
 	if err != nil {
 		if err == ErrTableExists {
-			http.Error(w, "TableAlreadyExists", http.StatusConflict)
+			common.WriteErrorResponse(w, http.StatusConflict, "TableAlreadyExists", "Table already exists")
 			return
 		}
-		http.Error(w, fmt.Sprintf("InternalServerError: %v", err), http.StatusInternalServerError)
+		common.WriteErrorResponse(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 		return
 	}
 
+	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -206,7 +210,7 @@ func GetEntity(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 2 {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
+		common.WriteErrorResponse(w, http.StatusBadRequest, "InvalidInput", "Invalid path")
 		return
 	}
 
@@ -214,7 +218,7 @@ func GetEntity(w http.ResponseWriter, r *http.Request) {
 	re := regexp.MustCompile(`([^(]+)\(PartitionKey='([^']+)',RowKey='([^']+)'\)`)
 	matches := re.FindStringSubmatch(parts[1])
 	if len(matches) < 4 {
-		http.Error(w, "Invalid entity path", http.StatusBadRequest)
+		common.WriteErrorResponse(w, http.StatusBadRequest, "InvalidInput", "Invalid entity path")
 		return
 	}
 	tableName := matches[1]
@@ -223,22 +227,22 @@ func GetEntity(w http.ResponseWriter, r *http.Request) {
 
 	table, err := globalStore.GetTable(context.Background(), tableName)
 	if err != nil {
-		http.Error(w, "TableNotFound", http.StatusNotFound)
+		common.WriteErrorResponse(w, http.StatusNotFound, "ResourceNotFound", "Table not found")
 		return
 	}
 
 	entity, err := table.GetEntity(context.Background(), pk, rk)
 	if err != nil {
 		if err == ErrEntityNotFound {
-			http.Error(w, "ResourceNotFound", http.StatusNotFound)
+			common.WriteErrorResponse(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
 			return
 		}
-		http.Error(w, fmt.Sprintf("InternalServerError: %v", err), http.StatusInternalServerError)
+		common.WriteErrorResponse(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 		return
 	}
 
+	common.SetResponseHeaders(w, entity.ETag)
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("ETag", entity.ETag)
 	json.NewEncoder(w).Encode(entity)
 }
 

@@ -11,7 +11,7 @@ RUN go mod download
 COPY ../ .
 
 # Build the binary with optimizations
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /fazure ./cmd/fauxtable
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /fazure ./cmd
 
 # Final stage - minimal runtime image
 FROM gcr.io/distroless/static-debian12:nonroot

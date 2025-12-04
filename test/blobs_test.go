@@ -13,22 +13,22 @@ import (
 )
 
 const (
-	emulatorURL = "http://localhost:10000"
-	accountName = "devstoreaccount1"
+	blobEmulatorURL = "http://localhost:10000"
+	blobAccountName = "devstoreaccount1"
 )
 
-func skipIfNotRunning(t *testing.T) {
+func skipBlobIfNotRunning(t *testing.T) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", emulatorURL+"/health", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", blobEmulatorURL+"/health", nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 
 	if err != nil || (resp != nil && resp.StatusCode != 200) {
-		t.Skip("Emulator not running. Start with: docker compose up -d")
+		t.Skip("Blob emulator not running. Start with: docker compose up -d")
 	}
 
 	if resp != nil {
@@ -36,141 +36,201 @@ func skipIfNotRunning(t *testing.T) {
 	}
 }
 
+func newBlobServiceClient(t *testing.T) *azblob.Client {
+	client, err := azblob.NewClientWithNoCredential(
+		blobEmulatorURL+"/"+blobAccountName, nil,
+	)
+	require.NoError(t, err, "Failed to create blob service client")
+	return client
+}
+
 // ============================================================================
-// ShouldCreateContainerGivenValidNameWhenCallingCreateContainer
+// Container Tests
 // ============================================================================
+
 func TestShouldCreateContainerGivenValidNameWhenCallingCreateContainer(t *testing.T) {
-	skipIfNotRunning(t)
+	skipBlobIfNotRunning(t)
 
-	// Arrange
 	ctx := context.Background()
-	client, err := azblob.NewClientWithNoCredential(emulatorURL+"/"+accountName, nil)
-	require.NoError(t, err, "Arrange: failed to create client")
+	client := newBlobServiceClient(t)
+	containerName := "test-container-create"
 
-	containerName := "create-container-test"
-
-	// Act
-	_, err = client.CreateContainer(ctx, containerName, nil)
-
-	// Assert
-	require.NoError(t, err, "Assert: CreateContainer returned error")
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err, "CreateContainer should succeed")
 
 	// Cleanup
 	defer client.DeleteContainer(ctx, containerName, nil)
 }
 
-// ============================================================================
-// ShouldUploadBlobGivenExistingContainerWhenUploadingBuffer
-// ============================================================================
-func TestShouldUploadBlobGivenExistingContainerWhenUploadingBuffer(t *testing.T) {
-	skipIfNotRunning(t)
+func TestShouldListContainersGivenMultipleContainersWhenCallingListContainers(t *testing.T) {
+	skipBlobIfNotRunning(t)
 
-	// Arrange
 	ctx := context.Background()
-	client, err := azblob.NewClientWithNoCredential(emulatorURL+"/"+accountName, nil)
-	require.NoError(t, err, "Arrange: failed to create client")
+	client := newBlobServiceClient(t)
 
-	containerName := "upload-test"
-	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	// Create test containers
+	containers := []string{"list-test-1", "list-test-2", "list-test-3"}
+	for _, name := range containers {
+		_, _ = client.CreateContainer(ctx, name, nil)
+		defer client.DeleteContainer(ctx, name, nil)
+	}
 
-	testData := []byte("Hello Azure Storage!")
+	// List containers
+	pager := client.NewListContainersPager(nil)
+	found := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		found += len(page.ContainerItems)
+	}
 
-	// Act
-	_, err = client.UploadBuffer(ctx, containerName, "test.txt", testData, nil)
-
-	// Assert
-	require.NoError(t, err, "Assert: UploadBuffer returned error")
+	assert.GreaterOrEqual(t, found, 3, "Should find at least the 3 test containers")
 }
 
 // ============================================================================
-// ShouldDownloadBlobGivenUploadedBlobWhenCallingDownloadStream
+// Blob Tests
 // ============================================================================
-func TestShouldDownloadBlobGivenUploadedBlobWhenCallingDownloadStream(t *testing.T) {
-	skipIfNotRunning(t)
 
-	// Arrange
+func TestShouldUploadBlobGivenValidBlobDataWhenCallingUploadBlob(t *testing.T) {
+	skipBlobIfNotRunning(t)
+
 	ctx := context.Background()
-	client, err := azblob.NewClientWithNoCredential(emulatorURL+"/"+accountName, nil)
-	require.NoError(t, err, "Arrange: failed to create client")
+	client := newBlobServiceClient(t)
+	containerName := "test-upload"
+	blobName := "test.txt"
 
-	containerName := "download-test"
+	// Create container
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	// Upload blob
+	data := []byte("Hello, Blob Storage!")
+	_, err = client.UploadBuffer(ctx, containerName, blobName, data, nil)
+	require.NoError(t, err, "Upload should succeed")
+}
+
+func TestShouldDownloadBlobGivenExistingBlobWhenCallingDownloadBlob(t *testing.T) {
+	skipBlobIfNotRunning(t)
+
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-download"
+	blobName := "test.txt"
+
+	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
 	defer client.DeleteContainer(ctx, containerName, nil)
 
-	expected := []byte("Download test data")
-	_, err = client.UploadBuffer(ctx, containerName, "download.txt", expected, nil)
-	require.NoError(t, err, "Arrange: upload failed")
+	data := []byte("Download this content")
+	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
+	require.NoError(t, err)
 
-	// Act
-	resp, err := client.DownloadStream(ctx, containerName, "download.txt", nil)
+	// Download blob
+	resp, err := client.DownloadStream(ctx, containerName, blobName, nil)
+	require.NoError(t, err)
 
-	// Assert
-	require.NoError(t, err, "Assert: DownloadStream failed")
-	defer resp.Body.Close()
+	downloaded, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	resp.Body.Close()
 
-	actual, err := io.ReadAll(resp.Body)
-	require.NoError(t, err, "Assert: reading body failed")
-
-	assert.Equal(t, string(expected), string(actual), "Assert: blob content mismatch")
+	assert.Equal(t, data, downloaded, "Downloaded content should match uploaded content")
 }
 
-// ============================================================================
-// ShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob
-// ============================================================================
 func TestShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob(t *testing.T) {
-	skipIfNotRunning(t)
+	skipBlobIfNotRunning(t)
 
-	// Arrange
 	ctx := context.Background()
-	client, err := azblob.NewClientWithNoCredential(emulatorURL+"/"+accountName, nil)
-	require.NoError(t, err, "Arrange: failed to create client")
+	client := newBlobServiceClient(t)
+	containerName := "test-delete"
+	blobName := "deleteme.txt"
 
-	containerName := "delete-test"
+	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
 	defer client.DeleteContainer(ctx, containerName, nil)
 
-	_, err = client.UploadBuffer(ctx, containerName, "todelete.txt", []byte("delete me"), nil)
-	require.NoError(t, err, "Arrange: upload failed")
+	data := []byte("Delete me")
+	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
+	require.NoError(t, err)
 
-	// Act
-	_, err = client.DeleteBlob(ctx, containerName, "todelete.txt", nil)
-
-	// Assert
-	require.NoError(t, err, "Assert: DeleteBlob returned error")
+	// Delete blob
+	_, err = client.DeleteBlob(ctx, containerName, blobName, nil)
+	require.NoError(t, err, "Delete should succeed")
 }
 
-// ============================================================================
-// ShouldListBlobsGivenContainerWithTwoBlobsWhenCallingListBlobsFlatPager
-// ============================================================================
-func TestShouldListBlobsGivenContainerWithTwoBlobsWhenCallingListBlobsFlatPager(t *testing.T) {
-	skipIfNotRunning(t)
+func TestShouldListBlobsGivenMultipleBlobsWhenCallingListBlobs(t *testing.T) {
+	skipBlobIfNotRunning(t)
 
-	// Arrange
 	ctx := context.Background()
-	client, err := azblob.NewClientWithNoCredential(emulatorURL+"/"+accountName, nil)
-	require.NoError(t, err, "Arrange: failed to create client")
+	client := newBlobServiceClient(t)
+	containerName := "test-list-blobs"
 
-	containerName := "list-test"
+	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
 	defer client.DeleteContainer(ctx, containerName, nil)
 
 	// Upload multiple blobs
-	_, err = client.UploadBuffer(ctx, containerName, "file1.txt", []byte("data1"), nil)
-	require.NoError(t, err)
-	_, err = client.UploadBuffer(ctx, containerName, "file2.txt", []byte("data2"), nil)
-	require.NoError(t, err)
-
-	// Act
-	pager := client.NewListBlobsFlatPager(containerName, nil)
-	total := 0
-
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		require.NoError(t, err, "Assert: ListBlobs pager failure")
-		total += len(page.Segment.BlobItems)
+	blobs := []string{"blob1.txt", "blob2.txt", "blob3.txt"}
+	for _, name := range blobs {
+		_, err := client.UploadBuffer(ctx, containerName, name, []byte("data"), nil)
+		require.NoError(t, err)
 	}
 
-	// Assert
-	assert.Equal(t, 2, total, "Assert: unexpected blob count")
+	// List blobs
+	pager := client.NewListBlobsFlatPager(containerName, nil)
+	found := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		found += len(page.Segment.BlobItems)
+	}
+
+	assert.Equal(t, 3, found, "Should find exactly 3 blobs")
+}
+
+func TestShouldGetBlobPropertiesGivenExistingBlobWhenCallingGetBlobProperties(t *testing.T) {
+	skipBlobIfNotRunning(t)
+
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-properties"
+	blobName := "test.txt"
+
+	// Setup
+	_, _ = client.CreateContainer(ctx, containerName, nil)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	data := []byte("Test content")
+	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
+	require.NoError(t, err)
+
+	// Get properties
+	resp, err := client.DownloadStream(ctx, containerName, blobName, nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.NotNil(t, resp.ETag, "ETag should be present")
+	assert.NotNil(t, resp.LastModified, "LastModified should be present")
+	assert.Equal(t, int64(len(data)), *resp.ContentLength, "ContentLength should match")
+}
+
+func TestShouldSetBlobMetadataGivenExistingBlobWhenCallingSetBlobMetadata(t *testing.T) {
+	skipBlobIfNotRunning(t)
+
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-metadata"
+	blobName := "test.txt"
+
+	// Setup
+	_, _ = client.CreateContainer(ctx, containerName, nil)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	data := []byte("Test")
+	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
+	require.NoError(t, err)
+
+	// Note: Metadata operations require implementation in the emulator
+	// This test is a placeholder for when metadata support is added
+	t.Skip("Metadata operations not yet implemented in emulator")
 }
