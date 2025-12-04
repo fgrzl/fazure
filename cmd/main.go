@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/fgrzl/fazure/internal/blobs"
 	"github.com/fgrzl/fazure/internal/common"
@@ -22,10 +21,12 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "10000"
-	}
+	// Port configuration (matching Azurite defaults)
+	const (
+		blobPort  = "10000"
+		queuePort = "10001"
+		tablePort = "10002"
+	)
 
 	datadir := os.Getenv("DATA_DIR")
 	if datadir == "" {
@@ -55,82 +56,55 @@ func main() {
 	}
 	tableHandler := tables.NewHandler(tableStore, logger)
 
-	// Create main mux
-	mux := http.NewServeMux()
+	// Create separate mux for each service
+	blobMux := http.NewServeMux()
+	queueMux := http.NewServeMux()
+	tableMux := http.NewServeMux()
 
-	// Health check endpoint - register first before "/" dispatcher
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// Health check endpoints
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
-	})
-
-	// Register blob routes
-	blobHandler.RegisterRoutes(mux)
-
-	// Register queue routes
-	queueHandler.RegisterRoutes(mux)
-
-	// Register table routes
-	tableHandler.RegisterRoutes(mux)
-
-	// Dispatcher for storage operations
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Dispatch to the appropriate handler based on path and query parameters
-		path := strings.Trim(r.URL.Path, "/")
-		parts := strings.Split(path, "/")
-		query := r.URL.RawQuery
-
-		// If first part is account name, it's a storage service request
-		if len(parts) > 0 && parts[0] == "devstoreaccount1" {
-			// Route to handlers based on path structure
-			if len(parts) == 1 || (len(parts) == 2 && parts[1] == "") {
-				// Account-level operation (listing or root)
-				blobHandler.HandleRequest(w, r)
-			} else if len(parts) >= 2 {
-				// Determine service by path depth and query params
-				// Tables are: /devstoreaccount1/Tables or /devstoreaccount1/TableName(...)
-				// Queues are: /devstoreaccount1/queuename/messages
-				// Blobs are: /devstoreaccount1/containername/blobname
-
-				secondPart := strings.ToLower(parts[1])
-
-				// Check for table operations
-				if secondPart == "tables" || strings.HasPrefix(secondPart, "tables(") || secondPart == "$batch" {
-					tableHandler.HandleRequest(w, r)
-					return
-				}
-
-				// Check for queue operations
-				// Queues have /messages path or comp=list query with queue patterns
-				if len(parts) >= 3 && parts[2] == "messages" {
-					queueHandler.HandleRequest(w, r)
-					return
-				}
-
-				// Check for queue list operation
-				if strings.Contains(query, "comp=list") && !strings.Contains(query, "restype=container") {
-					// Could be queue list - check if it looks like a queue request
-					// Azure Queues use /{account}?comp=list format
-					queueHandler.HandleRequest(w, r)
-					return
-				}
-
-				// Default to blob (containers or blobs)
-				blobHandler.HandleRequest(w, r)
-			}
-		} else {
-			// Unknown request, try blob as default
-			blobHandler.HandleRequest(w, r)
-		}
-	})
-
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
 	}
+	blobMux.HandleFunc("/health", healthHandler)
+	queueMux.HandleFunc("/health", healthHandler)
+	tableMux.HandleFunc("/health", healthHandler)
 
-	logger.Info("starting azure storage emulator", "port", port, "datadir", datadir)
-	fmt.Printf("Starting Azure Storage Emulator on port %s\n", port)
-	fmt.Printf("Data directory: %s\n", datadir)
-	log.Fatal(srv.ListenAndServe())
+	// Route all requests to appropriate handlers
+	blobMux.HandleFunc("/", blobHandler.HandleRequest)
+	queueMux.HandleFunc("/", queueHandler.HandleRequest)
+	tableMux.HandleFunc("/", tableHandler.HandleRequest)
+
+	// Start servers
+	errChan := make(chan error, 3)
+
+	// Blob service
+	go func() {
+		logger.Info("starting blob service", "port", blobPort)
+		srv := &http.Server{Addr: ":" + blobPort, Handler: blobMux}
+		errChan <- srv.ListenAndServe()
+	}()
+
+	// Queue service
+	go func() {
+		logger.Info("starting queue service", "port", queuePort)
+		srv := &http.Server{Addr: ":" + queuePort, Handler: queueMux}
+		errChan <- srv.ListenAndServe()
+	}()
+
+	// Table service
+	go func() {
+		logger.Info("starting table service", "port", tablePort)
+		srv := &http.Server{Addr: ":" + tablePort, Handler: tableMux}
+		errChan <- srv.ListenAndServe()
+	}()
+
+	fmt.Println("Azure Storage Emulator started")
+	fmt.Printf("  Blob service:  http://localhost:%s\n", blobPort)
+	fmt.Printf("  Queue service: http://localhost:%s\n", queuePort)
+	fmt.Printf("  Table service: http://localhost:%s\n", tablePort)
+	fmt.Printf("  Data directory: %s\n", datadir)
+
+	// Wait for any server to fail
+	log.Fatal(<-errChan)
 }

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	tableEmulatorURL = "http://localhost:10000"
+	tableEmulatorURL = "http://localhost:10002"
 	tableAccountName = "devstoreaccount1"
 )
 

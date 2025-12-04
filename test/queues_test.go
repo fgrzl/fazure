@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	queueEmulatorURL = "http://localhost:10000"
+	queueEmulatorURL = "http://localhost:10001"
 	queueAccountName = "devstoreaccount1"
 )
 
