@@ -79,7 +79,7 @@ func main() {
 		// Dispatch to the appropriate handler based on path and query parameters
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
-		
+
 		// If first part is account name, it's a storage service request
 		if len(parts) > 0 && parts[0] == "devstoreaccount1" {
 			// Route to handlers based on path structure
@@ -95,7 +95,7 @@ func main() {
 				// Tables are: /devstoreaccount1/Tables or /devstoreaccount1/TableName
 				// Queues are: /devstoreaccount1/queuename
 				// Blobs are: /devstoreaccount1/containername/blobname
-				
+
 				secondPart := strings.ToLower(parts[1])
 				if secondPart == "tables" {
 					// Table Service request
