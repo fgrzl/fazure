@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -444,6 +445,44 @@ func (h *Handler) GetBlob(w http.ResponseWriter, r *http.Request, container, blo
 		return
 	}
 
+	// Handle Range header for partial content
+	rangeHeader := r.Header.Get("Range")
+	xmsRange := r.Header.Get("x-ms-range")
+	if xmsRange != "" {
+		rangeHeader = xmsRange
+	}
+
+	if rangeHeader != "" {
+		// Parse range header: "bytes=start-end"
+		rangeHeader = strings.TrimPrefix(rangeHeader, "bytes=")
+		parts := strings.Split(rangeHeader, "-")
+		if len(parts) == 2 {
+			start, _ := strconv.ParseInt(parts[0], 10, 64)
+			end := int64(len(blobData) - 1)
+			if parts[1] != "" {
+				end, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+
+			// Clamp to valid range
+			if start < 0 {
+				start = 0
+			}
+			if end >= int64(len(blobData)) {
+				end = int64(len(blobData)) - 1
+			}
+			if start <= end {
+				blobData = blobData[start : end+1]
+				h.log.Debug("serving partial content", "container", container, "blob", blob, "start", start, "end", end)
+				common.SetResponseHeaders(w, meta.ETag)
+				common.SetBlobHeaders(w, meta.ContentType, int64(len(blobData)))
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, meta.ContentLength))
+				w.WriteHeader(http.StatusPartialContent)
+				w.Write(blobData)
+				return
+			}
+		}
+	}
+
 	h.log.Debug("blob downloaded", "container", container, "blob", blob, "size", len(blobData))
 	common.SetResponseHeaders(w, meta.ETag)
 	common.SetBlobHeaders(w, meta.ContentType, int64(len(blobData)))
@@ -481,6 +520,12 @@ func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 
 	common.SetResponseHeaders(w, meta.ETag)
 	common.SetBlobHeaders(w, meta.ContentType, meta.ContentLength)
+
+	// Return user metadata as x-ms-meta-* headers
+	for key, value := range meta.UserMetadata {
+		w.Header().Set("x-ms-meta-"+key, value)
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -531,6 +576,8 @@ func (h *Handler) DeleteBlob(w http.ResponseWriter, r *http.Request, container, 
 func (h *Handler) ListBlobs(w http.ResponseWriter, r *http.Request, container string) {
 	h.log.Debug("listing blobs", "container", container)
 
+	prefixFilter := r.URL.Query().Get("prefix")
+
 	// Check if container exists
 	containerKey := h.containerKey(container)
 	_, closer, err := h.db.Get(containerKey)
@@ -568,6 +615,10 @@ func (h *Handler) ListBlobs(w http.ResponseWriter, r *http.Request, container st
 	result := EnumerationResults{ContainerName: container}
 	for iter.First(); iter.Valid(); iter.Next() {
 		name := string(iter.Key()[len(prefix):])
+		// Apply prefix filter if specified
+		if prefixFilter != "" && !strings.HasPrefix(name, prefixFilter) {
+			continue
+		}
 		result.Blobs = append(result.Blobs, Blob{Name: name})
 	}
 
@@ -576,4 +627,461 @@ func (h *Handler) ListBlobs(w http.ResponseWriter, r *http.Request, container st
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
 	xml.NewEncoder(w).Encode(result)
+}
+
+// blockKey returns the Pebble key for a staged block
+func (h *Handler) blockKey(container, blob, blockID string) []byte {
+	return []byte(fmt.Sprintf("blobs/blocks/%s/%s/%s", container, blob, blockID))
+}
+
+// PutBlock stages a block for later commit
+func (h *Handler) PutBlock(w http.ResponseWriter, r *http.Request, container, blob string) {
+	blockID := r.URL.Query().Get("blockid")
+	h.log.Info("putting block", "container", container, "blob", blob, "blockId", blockID)
+
+	// Check if container exists
+	containerKey := h.containerKey(container)
+	_, closer, err := h.db.Get(containerKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	closer.Close()
+
+	// Read block data
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Store block
+	key := h.blockKey(container, blob, blockID)
+	if err := h.db.Set(key, data, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	h.log.Info("block staged", "container", container, "blob", blob, "blockId", blockID, "size", len(data))
+	common.SetResponseHeaders(w, "")
+	w.WriteHeader(http.StatusCreated)
+}
+
+// PutBlockList commits staged blocks to create a blob
+func (h *Handler) PutBlockList(w http.ResponseWriter, r *http.Request, container, blob string) {
+	h.log.Info("putting block list", "container", container, "blob", blob)
+
+	// Parse block list from request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "InvalidInput", "Failed to read request body")
+		return
+	}
+
+	type BlockList struct {
+		Latest []string `xml:"Latest"`
+	}
+	var blockList BlockList
+	if err := xml.Unmarshal(body, &blockList); err != nil {
+		h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid XML format")
+		return
+	}
+
+	// Assemble blob data from blocks
+	var blobData []byte
+	for _, blockID := range blockList.Latest {
+		key := h.blockKey(container, blob, blockID)
+		data, closer, err := h.db.Get(key)
+		if err != nil {
+			h.log.Error("block not found", "blockId", blockID, "error", err)
+			h.writeError(w, http.StatusBadRequest, "InvalidBlockList", "Block not found: "+blockID)
+			return
+		}
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		closer.Close()
+		blobData = append(blobData, dataCopy...)
+	}
+
+	// Write assembled blob to filesystem
+	blobPath := h.blobFilePath(container, blob)
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0755); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	if err := os.WriteFile(blobPath, blobData, 0644); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Store metadata
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	etag := common.GenerateETag(blobData)
+
+	metadata := BlobMetadata{
+		Container:     container,
+		Blob:          blob,
+		ContentType:   contentType,
+		ContentLength: int64(len(blobData)),
+		ETag:          etag,
+		Created:       time.Now().UTC(),
+		Modified:      time.Now().UTC(),
+		FilePath:      blobPath,
+	}
+	metadataBytes, _ := json.Marshal(metadata)
+	metaKey := h.blobMetaKey(container, blob)
+	if err := h.db.Set(metaKey, metadataBytes, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Delete staged blocks
+	for _, blockID := range blockList.Latest {
+		h.db.Delete(h.blockKey(container, blob, blockID), pebble.Sync)
+	}
+
+	h.log.Info("block list committed", "container", container, "blob", blob, "size", len(blobData))
+	common.SetResponseHeaders(w, etag)
+	w.WriteHeader(http.StatusCreated)
+}
+
+// GetBlockList returns the list of committed blocks
+func (h *Handler) GetBlockList(w http.ResponseWriter, r *http.Request, container, blob string) {
+	h.log.Debug("getting block list", "container", container, "blob", blob)
+
+	type Block struct {
+		Name string `xml:"Name"`
+		Size int64  `xml:"Size"`
+	}
+	type BlockList struct {
+		XMLName         xml.Name `xml:"BlockList"`
+		CommittedBlocks []Block  `xml:"CommittedBlocks>Block"`
+	}
+
+	// For simplicity, return empty list - blocks are only transiently stored
+	result := BlockList{}
+	common.SetResponseHeaders(w, "")
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	xml.NewEncoder(w).Encode(result)
+}
+
+// SetBlobMetadata sets user-defined metadata on a blob
+func (h *Handler) SetBlobMetadata(w http.ResponseWriter, r *http.Request, container, blob string) {
+	h.log.Info("setting blob metadata", "container", container, "blob", blob)
+
+	// Get existing metadata
+	metaKey := h.blobMetaKey(container, blob)
+	data, closer, err := h.db.Get(metaKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The specified blob does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
+	var meta BlobMetadata
+	if err := json.Unmarshal(dataCopy, &meta); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Extract x-ms-meta-* headers
+	if meta.UserMetadata == nil {
+		meta.UserMetadata = make(map[string]string)
+	}
+	for key, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(key), "x-ms-meta-") {
+			metaKey := strings.TrimPrefix(strings.ToLower(key), "x-ms-meta-")
+			if len(values) > 0 {
+				meta.UserMetadata[metaKey] = values[0]
+			}
+		}
+	}
+
+	// Save updated metadata
+	metadataBytes, _ := json.Marshal(meta)
+	if err := h.db.Set(h.blobMetaKey(container, blob), metadataBytes, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	h.log.Info("blob metadata set", "container", container, "blob", blob)
+	common.SetResponseHeaders(w, meta.ETag)
+	w.WriteHeader(http.StatusOK)
+}
+
+// SetContainerMetadata sets metadata on a container
+func (h *Handler) SetContainerMetadata(w http.ResponseWriter, r *http.Request, container string) {
+	h.log.Info("setting container metadata", "container", container)
+
+	key := h.containerKey(container)
+	data, closer, err := h.db.Get(key)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
+	var meta map[string]interface{}
+	if err := json.Unmarshal(dataCopy, &meta); err != nil {
+		meta = make(map[string]interface{})
+	}
+
+	// Extract x-ms-meta-* headers
+	userMeta := make(map[string]string)
+	for key, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(key), "x-ms-meta-") {
+			metaKey := strings.TrimPrefix(strings.ToLower(key), "x-ms-meta-")
+			if len(values) > 0 {
+				userMeta[metaKey] = values[0]
+			}
+		}
+	}
+	meta["userMetadata"] = userMeta
+
+	metadataBytes, _ := json.Marshal(meta)
+	if err := h.db.Set(key, metadataBytes, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	h.log.Info("container metadata set", "container", container)
+	common.SetResponseHeaders(w, "")
+	w.WriteHeader(http.StatusOK)
+}
+
+// SetContainerACL sets the access control list for a container
+func (h *Handler) SetContainerACL(w http.ResponseWriter, r *http.Request, container string) {
+	h.log.Info("setting container ACL", "container", container)
+
+	key := h.containerKey(container)
+	_, closer, err := h.db.Get(key)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	closer.Close()
+
+	// For now, just acknowledge the request (ACL not fully implemented)
+	common.SetResponseHeaders(w, "")
+	w.WriteHeader(http.StatusOK)
+}
+
+// GetContainerACL gets the access control list for a container
+func (h *Handler) GetContainerACL(w http.ResponseWriter, r *http.Request, container string) {
+	h.log.Debug("getting container ACL", "container", container)
+
+	key := h.containerKey(container)
+	_, closer, err := h.db.Get(key)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	closer.Close()
+
+	type SignedIdentifiers struct {
+		XMLName xml.Name `xml:"SignedIdentifiers"`
+	}
+
+	common.SetResponseHeaders(w, "")
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	xml.NewEncoder(w).Encode(SignedIdentifiers{})
+}
+
+// CreateSnapshot creates a snapshot of a blob
+func (h *Handler) CreateSnapshot(w http.ResponseWriter, r *http.Request, container, blob string) {
+	h.log.Info("creating snapshot", "container", container, "blob", blob)
+
+	// Get blob metadata
+	metaKey := h.blobMetaKey(container, blob)
+	data, closer, err := h.db.Get(metaKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The specified blob does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
+	// Generate snapshot timestamp
+	snapshot := time.Now().UTC().Format("2006-01-02T15:04:05.0000000Z")
+
+	common.SetResponseHeaders(w, "")
+	w.Header().Set("x-ms-snapshot", snapshot)
+	w.WriteHeader(http.StatusCreated)
+}
+
+// LeaseBlob handles lease operations on a blob
+func (h *Handler) LeaseBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
+	leaseAction := r.Header.Get("x-ms-lease-action")
+	h.log.Info("lease blob", "container", container, "blob", blob, "action", leaseAction)
+
+	// Get blob metadata
+	metaKey := h.blobMetaKey(container, blob)
+	data, closer, err := h.db.Get(metaKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The specified blob does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
+	var meta BlobMetadata
+	json.Unmarshal(dataCopy, &meta)
+
+	switch leaseAction {
+	case "acquire":
+		// Generate lease ID
+		leaseID := fmt.Sprintf("lease-%d", time.Now().UnixNano())
+		common.SetResponseHeaders(w, meta.ETag)
+		w.Header().Set("x-ms-lease-id", leaseID)
+		w.WriteHeader(http.StatusCreated)
+
+	case "release", "break":
+		common.SetResponseHeaders(w, meta.ETag)
+		w.WriteHeader(http.StatusOK)
+
+	case "renew", "change":
+		leaseID := r.Header.Get("x-ms-lease-id")
+		common.SetResponseHeaders(w, meta.ETag)
+		w.Header().Set("x-ms-lease-id", leaseID)
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		h.writeError(w, http.StatusBadRequest, "InvalidHeaderValue", "Invalid lease action")
+	}
+}
+
+// CopyBlob copies a blob from a source URL
+func (h *Handler) CopyBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
+	copySource := r.Header.Get("x-ms-copy-source")
+	h.log.Info("copying blob", "container", container, "blob", blob, "source", copySource)
+
+	// Check if container exists
+	containerKey := h.containerKey(container)
+	_, closer, err := h.db.Get(containerKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	closer.Close()
+
+	// Parse source URL to extract container/blob
+	// Source URL format: http://host:port/account/container/blob
+	sourceParts := strings.Split(strings.TrimPrefix(copySource, "http://"), "/")
+	if len(sourceParts) < 3 {
+		sourceParts = strings.Split(strings.TrimPrefix(copySource, "https://"), "/")
+	}
+	if len(sourceParts) < 3 {
+		h.writeError(w, http.StatusBadRequest, "InvalidHeaderValue", "Invalid copy source URL")
+		return
+	}
+	// Extract container and blob from source (skip host and account)
+	srcContainer := sourceParts[1]
+	srcBlob := strings.Join(sourceParts[2:], "/")
+
+	// Read source blob
+	srcMetaKey := h.blobMetaKey(srcContainer, srcBlob)
+	srcMetaData, srcCloser, err := h.db.Get(srcMetaKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The source blob does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	srcMetaCopy := make([]byte, len(srcMetaData))
+	copy(srcMetaCopy, srcMetaData)
+	srcCloser.Close()
+
+	var srcMeta BlobMetadata
+	if err := json.Unmarshal(srcMetaCopy, &srcMeta); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Read source blob data
+	srcData, err := os.ReadFile(srcMeta.FilePath)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Write to destination
+	blobPath := h.blobFilePath(container, blob)
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0755); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	if err := os.WriteFile(blobPath, srcData, 0644); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Create destination metadata
+	etag := common.GenerateETag(srcData)
+	destMeta := BlobMetadata{
+		Container:     container,
+		Blob:          blob,
+		ContentType:   srcMeta.ContentType,
+		ContentLength: srcMeta.ContentLength,
+		ETag:          etag,
+		Created:       time.Now().UTC(),
+		Modified:      time.Now().UTC(),
+		FilePath:      blobPath,
+	}
+	metadataBytes, _ := json.Marshal(destMeta)
+	if err := h.db.Set(h.blobMetaKey(container, blob), metadataBytes, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	copyID := fmt.Sprintf("copy-%d", time.Now().UnixNano())
+	h.log.Info("blob copied", "container", container, "blob", blob)
+	common.SetResponseHeaders(w, etag)
+	w.Header().Set("x-ms-copy-id", copyID)
+	w.Header().Set("x-ms-copy-status", "success")
+	w.WriteHeader(http.StatusAccepted)
 }

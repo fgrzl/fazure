@@ -693,10 +693,11 @@ func (h *Handler) writeBatchErrorWithIndex(w http.ResponseWriter, index int, err
 	code := "InvalidInput"
 	statusCode := http.StatusBadRequest
 
-	if err == ErrEntityExists {
+	switch err {
+	case ErrEntityExists:
 		code = "EntityAlreadyExists"
 		statusCode = http.StatusConflict
-	} else if err == ErrEntityNotFound {
+	case ErrEntityNotFound:
 		code = "ResourceNotFound"
 		statusCode = http.StatusNotFound
 	}
