@@ -2,6 +2,7 @@ package tables
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -36,49 +37,58 @@ func MatchesFilter(filter string, entity map[string]interface{}) bool {
 	}
 
 	// Simplified filter parser - handles basic equality and logical operators
-	// Real implementation would handle full OData syntax
 	filter = strings.TrimSpace(filter)
 
-	// Split by 'and' / 'or'
-	if strings.Contains(strings.ToLower(filter), " and ") {
-		parts := strings.Split(strings.ToLower(filter), " and ")
-		for _, part := range parts {
-			if !evaluateSimpleFilter(part, entity) {
-				return false
-			}
-		}
-		return true
+	// Handle 'and' operator (case insensitive)
+	andIndex := findOperatorIndex(filter, " and ")
+	if andIndex >= 0 {
+		left := strings.TrimSpace(filter[:andIndex])
+		right := strings.TrimSpace(filter[andIndex+5:])
+		return MatchesFilter(left, entity) && MatchesFilter(right, entity)
 	}
 
-	if strings.Contains(strings.ToLower(filter), " or ") {
-		parts := strings.Split(strings.ToLower(filter), " or ")
-		for _, part := range parts {
-			if evaluateSimpleFilter(part, entity) {
-				return true
-			}
-		}
-		return false
+	// Handle 'or' operator (case insensitive)
+	orIndex := findOperatorIndex(filter, " or ")
+	if orIndex >= 0 {
+		left := strings.TrimSpace(filter[:orIndex])
+		right := strings.TrimSpace(filter[orIndex+4:])
+		return MatchesFilter(left, entity) || MatchesFilter(right, entity)
 	}
 
 	return evaluateSimpleFilter(filter, entity)
 }
 
+// findOperatorIndex finds the index of an operator (case insensitive)
+func findOperatorIndex(s, op string) int {
+	lower := strings.ToLower(s)
+	lowerOp := strings.ToLower(op)
+	return strings.Index(lower, lowerOp)
+}
+
 // evaluateSimpleFilter evaluates a single filter expression
 func evaluateSimpleFilter(filter string, entity map[string]interface{}) bool {
+	filter = strings.TrimSpace(filter)
+
 	// Handle comparison operators: eq, ne, lt, le, gt, ge
-	operators := []string{"eq", "ne", "lt", "le", "gt", "ge"}
+	operators := []struct {
+		op   string
+		eval func(left, right interface{}) bool
+	}{
+		{"eq", func(l, r interface{}) bool { return compareValues(l, r) == 0 }},
+		{"ne", func(l, r interface{}) bool { return compareValues(l, r) != 0 }},
+		{"lt", func(l, r interface{}) bool { return compareValues(l, r) < 0 }},
+		{"le", func(l, r interface{}) bool { return compareValues(l, r) <= 0 }},
+		{"gt", func(l, r interface{}) bool { return compareValues(l, r) > 0 }},
+		{"ge", func(l, r interface{}) bool { return compareValues(l, r) >= 0 }},
+	}
 
 	for _, op := range operators {
-		if strings.Contains(filter, " "+op+" ") {
-			parts := strings.Split(filter, " "+op+" ")
-			if len(parts) != 2 {
-				continue
-			}
+		idx := findOperatorIndex(filter, " "+op.op+" ")
+		if idx >= 0 {
+			left := strings.TrimSpace(filter[:idx])
+			right := strings.TrimSpace(filter[idx+len(op.op)+2:])
 
-			left := strings.TrimSpace(parts[0])
-			right := strings.TrimSpace(parts[1])
-
-			// Remove quotes from right side if present
+			// Remove quotes from right side if present (string value)
 			if strings.HasPrefix(right, "'") && strings.HasSuffix(right, "'") {
 				right = right[1 : len(right)-1]
 			}
@@ -89,26 +99,59 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) bool {
 				return false
 			}
 
-			valStr := fmt.Sprintf("%v", val)
-
-			switch op {
-			case "eq":
-				return valStr == right
-			case "ne":
-				return valStr != right
-			case "lt":
-				return valStr < right
-			case "le":
-				return valStr <= right
-			case "gt":
-				return valStr > right
-			case "ge":
-				return valStr >= right
-			}
+			return op.eval(val, right)
 		}
 	}
 
 	return true
+}
+
+// compareValues compares two values, handling type conversion
+func compareValues(left, right interface{}) int {
+	// Try numeric comparison first
+	leftNum, leftIsNum := toFloat64(left)
+	rightNum, rightIsNum := toFloat64(right)
+
+	if leftIsNum && rightIsNum {
+		if leftNum < rightNum {
+			return -1
+		} else if leftNum > rightNum {
+			return 1
+		}
+		return 0
+	}
+
+	// Fall back to string comparison
+	leftStr := fmt.Sprintf("%v", left)
+	rightStr := fmt.Sprintf("%v", right)
+
+	if leftStr < rightStr {
+		return -1
+	} else if leftStr > rightStr {
+		return 1
+	}
+	return 0
+}
+
+// toFloat64 attempts to convert a value to float64
+func toFloat64(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case string:
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 // SelectFields returns only selected fields from entity

@@ -304,10 +304,17 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		return
 	}
 
-	entity, err := table.UpdateEntity(context.Background(), pk, rk, data, false)
+	// Get If-Match header for ETag validation
+	ifMatch := r.Header.Get("If-Match")
+
+	entity, err := table.UpdateEntityWithETag(context.Background(), pk, rk, data, false, ifMatch)
 	if err != nil {
 		if err == ErrEntityNotFound {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			return
+		}
+		if err == ErrPreconditionFailed {
+			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied", "The update condition specified in the request was not satisfied")
 			return
 		}
 		h.log.Error("failed to update entity", "table", tableName, "error", err)
@@ -320,7 +327,7 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// MergeEntity merges an entity (MERGE/PATCH)
+// MergeEntity merges an entity (MERGE/PATCH) - also supports upsert
 func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName, pk, rk string) {
 	h.log.Info("merging entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
@@ -336,10 +343,25 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 		return
 	}
 
-	entity, err := table.UpdateEntity(context.Background(), pk, rk, data, true)
+	// Get If-Match header for ETag validation
+	ifMatch := r.Header.Get("If-Match")
+
+	var entity *Entity
+	if ifMatch == "" || ifMatch == "*" {
+		// No ETag or wildcard - do upsert (insert or merge)
+		entity, err = table.UpsertEntity(context.Background(), pk, rk, data, true)
+	} else {
+		// ETag specified - must match existing entity
+		entity, err = table.UpdateEntityWithETag(context.Background(), pk, rk, data, true, ifMatch)
+	}
+
 	if err != nil {
 		if err == ErrEntityNotFound {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			return
+		}
+		if err == ErrPreconditionFailed {
+			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied", "The update condition specified in the request was not satisfied")
 			return
 		}
 		h.log.Error("failed to merge entity", "table", tableName, "error", err)

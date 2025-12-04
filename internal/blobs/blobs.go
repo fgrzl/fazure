@@ -79,13 +79,21 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPut:
 			if query.Get("restype") == "container" {
-				h.CreateContainer(w, r, container)
+				if query.Get("comp") == "metadata" {
+					h.SetContainerMetadata(w, r, container)
+				} else if query.Get("comp") == "acl" {
+					h.SetContainerACL(w, r, container)
+				} else {
+					h.CreateContainer(w, r, container)
+				}
 			} else {
 				h.writeError(w, http.StatusBadRequest, "InvalidQueryParameterValue", "restype=container required")
 			}
 		case http.MethodGet:
 			if query.Get("restype") == "container" && query.Get("comp") == "list" {
 				h.ListBlobs(w, r, container)
+			} else if query.Get("restype") == "container" && query.Get("comp") == "acl" {
+				h.GetContainerACL(w, r, container)
 			} else {
 				h.writeError(w, http.StatusBadRequest, "InvalidQueryParameterValue", "Invalid query parameters")
 			}
@@ -108,9 +116,27 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPut:
-		h.PutBlob(w, r, container, blob)
+		if query.Get("comp") == "block" {
+			h.PutBlock(w, r, container, blob)
+		} else if query.Get("comp") == "blocklist" {
+			h.PutBlockList(w, r, container, blob)
+		} else if query.Get("comp") == "metadata" {
+			h.SetBlobMetadata(w, r, container, blob)
+		} else if query.Get("comp") == "snapshot" {
+			h.CreateSnapshot(w, r, container, blob)
+		} else if query.Get("comp") == "lease" {
+			h.LeaseBlob(w, r, container, blob)
+		} else if r.Header.Get("x-ms-copy-source") != "" {
+			h.CopyBlob(w, r, container, blob)
+		} else {
+			h.PutBlob(w, r, container, blob)
+		}
 	case http.MethodGet:
-		h.GetBlob(w, r, container, blob)
+		if query.Get("comp") == "blocklist" {
+			h.GetBlockList(w, r, container, blob)
+		} else {
+			h.GetBlob(w, r, container, blob)
+		}
 	case http.MethodHead:
 		h.GetBlobProperties(w, r, container, blob)
 	case http.MethodDelete:

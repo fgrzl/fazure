@@ -264,6 +264,11 @@ func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*En
 
 // UpdateEntity updates an entity (merge if merge=true, replace if merge=false)
 func (t *Table) UpdateEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}, merge bool) (*Entity, error) {
+	return t.UpdateEntityWithETag(ctx, partitionKey, rowKey, properties, merge, "")
+}
+
+// UpdateEntityWithETag updates an entity with optional ETag validation
+func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}, merge bool, ifMatch string) (*Entity, error) {
 	db := t.store.DB()
 	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
 
@@ -283,15 +288,93 @@ func (t *Table) UpdateEntity(ctx context.Context, partitionKey, rowKey string, p
 	}
 	closer.Close()
 
+	// Validate ETag if provided (and not wildcard)
+	if ifMatch != "" && ifMatch != "*" {
+		if entity.ETag != ifMatch {
+			return nil, ErrPreconditionFailed
+		}
+	}
+
 	// Update properties
 	if merge {
-		// Merge: add/update properties
+		// Merge: add/update properties, keep existing ones
+		if entity.Properties == nil {
+			entity.Properties = make(map[string]interface{})
+		}
 		for k, v := range properties {
-			entity.Properties[k] = v
+			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+				entity.Properties[k] = v
+			}
 		}
 	} else {
 		// Replace: replace all properties
-		entity.Properties = properties
+		entity.Properties = make(map[string]interface{})
+		for k, v := range properties {
+			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+				entity.Properties[k] = v
+			}
+		}
+	}
+
+	// Update timestamp and ETag
+	entity.Timestamp = time.Now().UTC()
+	data, _ = json.Marshal(entity)
+	entity.ETag = common.GenerateETag(data)
+
+	// Marshal with new ETag
+	data, err = json.Marshal(entity)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.Set(key, data, pebble.Sync); err != nil {
+		return nil, err
+	}
+
+	return &entity, nil
+}
+
+// UpsertEntity inserts or updates an entity
+func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}, merge bool) (*Entity, error) {
+	db := t.store.DB()
+	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
+
+	// Try to get existing entity
+	data, closer, err := db.Get(key)
+	if err == pebble.ErrNotFound {
+		// Entity doesn't exist, insert new one
+		return t.InsertEntity(ctx, partitionKey, rowKey, properties)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var entity Entity
+	if err := json.Unmarshal(data, &entity); err != nil {
+		closer.Close()
+		return nil, err
+	}
+	closer.Close()
+
+	// Update properties
+	if merge {
+		// Merge: add/update properties, keep existing ones
+		if entity.Properties == nil {
+			entity.Properties = make(map[string]interface{})
+		}
+		for k, v := range properties {
+			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+				entity.Properties[k] = v
+			}
+		}
+	} else {
+		// Replace: replace all properties
+		entity.Properties = make(map[string]interface{})
+		for k, v := range properties {
+			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+				entity.Properties[k] = v
+			}
+		}
 	}
 
 	// Update timestamp and ETag
@@ -392,6 +475,21 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 		// Skip the continuation token entity itself (we want to start after it)
 		if nextPK != "" && nextRK != "" && entity.PartitionKey == nextPK && entity.RowKey == nextRK {
 			continue
+		}
+
+		// Apply filter if specified
+		if filter != "" {
+			// Convert entity to map for filtering
+			entityMap := map[string]interface{}{
+				"PartitionKey": entity.PartitionKey,
+				"RowKey":       entity.RowKey,
+			}
+			for k, v := range entity.Properties {
+				entityMap[k] = v
+			}
+			if !MatchesFilter(filter, entityMap) {
+				continue
+			}
 		}
 
 		entities = append(entities, &entity)

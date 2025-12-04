@@ -8,6 +8,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -134,12 +135,28 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 				}
 
 				// Extract table name from URL path
-				// URL looks like: /devstoreaccount1/tablename
+				// URL looks like: /devstoreaccount1/tablename or
+				// /devstoreaccount1/tablename(PartitionKey='pk',RowKey='rk')
 				urlPath := strings.Trim(httpReq.URL.Path, "/")
 				urlParts := strings.Split(urlPath, "/")
 				var tableName string
 				if len(urlParts) >= 2 {
-					tableName = urlParts[1]
+					tablePart := urlParts[1]
+					// Check if the URL contains entity keys
+					// Format: tablename(PartitionKey='pk',RowKey='rk')
+					entityPattern := regexp.MustCompile(`^([^(]+)\(PartitionKey='([^']+)',RowKey='([^']+)'\)$`)
+					if matches := entityPattern.FindStringSubmatch(tablePart); len(matches) == 4 {
+						tableName = matches[1]
+						// Extract PK/RK from URL if not in body
+						if pk == "" {
+							pk = matches[2]
+						}
+						if rk == "" {
+							rk = matches[3]
+						}
+					} else {
+						tableName = tablePart
+					}
 				}
 
 				// Set table name on the batch request if not already set

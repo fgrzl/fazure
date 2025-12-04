@@ -1,6 +1,7 @@
 package queues
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -97,10 +98,14 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 {
 		switch r.Method {
 		case http.MethodPut:
-			h.CreateQueue(w, r, queue)
+			if query.Get("comp") == "metadata" {
+				h.SetQueueMetadata(w, r, queue)
+			} else {
+				h.CreateQueue(w, r, queue)
+			}
 		case http.MethodDelete:
 			h.DeleteQueue(w, r, queue)
-		case http.MethodGet:
+		case http.MethodGet, http.MethodHead:
 			h.GetQueueMetadata(w, r, queue)
 		default:
 			h.writeError(w, http.StatusMethodNotAllowed, "UnsupportedHttpVerb", "Method not allowed")
@@ -115,15 +120,26 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 			case http.MethodPost:
 				h.PutMessage(w, r, queue)
 			case http.MethodGet:
-				h.GetMessages(w, r, queue)
+				if query.Get("peekonly") == "true" {
+					h.PeekMessages(w, r, queue)
+				} else {
+					h.GetMessages(w, r, queue)
+				}
 			case http.MethodDelete:
 				h.ClearMessages(w, r, queue)
 			default:
 				h.writeError(w, http.StatusMethodNotAllowed, "UnsupportedHttpVerb", "Method not allowed")
 			}
-		} else if len(parts) == 4 && r.Method == http.MethodDelete {
+		} else if len(parts) == 4 {
 			messageID := parts[3]
-			h.DeleteMessage(w, r, queue, messageID)
+			switch r.Method {
+			case http.MethodDelete:
+				h.DeleteMessage(w, r, queue, messageID)
+			case http.MethodPut:
+				h.UpdateMessage(w, r, queue, messageID)
+			default:
+				h.writeError(w, http.StatusMethodNotAllowed, "UnsupportedHttpVerb", "Method not allowed")
+			}
 		}
 		return
 	}
@@ -246,7 +262,7 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 	h.log.Debug("getting queue metadata", "queue", queue)
 
 	key := h.queueKey(queue)
-	_, closer, err := h.db.Get(key)
+	data, closer, err := h.db.Get(key)
 	if err == pebble.ErrNotFound {
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
@@ -255,7 +271,23 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
+
+	// Make copy before closing
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 	closer.Close()
+
+	// Parse metadata to extract user metadata
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(dataCopy, &metadata); err == nil {
+		if userMeta, ok := metadata["userMetadata"].(map[string]interface{}); ok {
+			for k, v := range userMeta {
+				if vs, ok := v.(string); ok {
+					w.Header().Set("x-ms-meta-"+k, vs)
+				}
+			}
+		}
+	}
 
 	// Count messages
 	prefix := []byte(fmt.Sprintf("queues/data/%s/", queue))
@@ -283,6 +315,8 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("listing queues")
 
+	prefixFilter := r.URL.Query().Get("prefix")
+
 	prefix := []byte("queues/meta/")
 	iter, err := h.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
@@ -306,6 +340,10 @@ func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
 	result := EnumerationResults{}
 	for iter.First(); iter.Valid(); iter.Next() {
 		name := string(iter.Key()[len(prefix):])
+		// Apply prefix filter if specified
+		if prefixFilter != "" && !strings.HasPrefix(name, prefixFilter) {
+			continue
+		}
 		result.Queues = append(result.Queues, Queue{Name: name})
 	}
 
@@ -334,6 +372,22 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 	}
 	closer.Close()
 
+	// Parse TTL from query parameter (messagettl in seconds)
+	ttl := 7 * 24 * time.Hour // Default 7 days
+	if ttlStr := r.URL.Query().Get("messagettl"); ttlStr != "" {
+		if parsed, err := strconv.Atoi(ttlStr); err == nil && parsed > 0 {
+			ttl = time.Duration(parsed) * time.Second
+		}
+	}
+
+	// Parse visibility timeout from query parameter
+	visibilityTimeout := time.Duration(0)
+	if vt := r.URL.Query().Get("visibilitytimeout"); vt != "" {
+		if parsed, err := strconv.Atoi(vt); err == nil && parsed > 0 {
+			visibilityTimeout = time.Duration(parsed) * time.Second
+		}
+	}
+
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -357,9 +411,9 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 	message := Message{
 		MessageID:       messageID,
 		InsertionTime:   RFC1123Time(now),
-		ExpirationTime:  RFC1123Time(now.Add(7 * 24 * time.Hour)), // Default 7 days
+		ExpirationTime:  RFC1123Time(now.Add(ttl)),
 		PopReceipt:      h.generatePopReceipt(),
-		TimeNextVisible: RFC1123Time(now),
+		TimeNextVisible: RFC1123Time(now.Add(visibilityTimeout)),
 		DequeueCount:    0,
 		MessageText:     msg.MessageText, // SDK already base64 encodes, don't double encode
 	}
@@ -373,7 +427,7 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 		return
 	}
 
-	h.log.Info("message added", "queue", queue, "messageId", messageID)
+	h.log.Info("message added", "queue", queue, "messageId", messageID, "ttl", ttl)
 
 	// Return response
 	type QueueMessagesList struct {
@@ -565,6 +619,210 @@ func (h *Handler) ClearMessages(w http.ResponseWriter, r *http.Request, queue st
 	}
 
 	h.log.Info("messages cleared", "queue", queue, "count", count)
+	common.SetResponseHeaders(w, "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// PeekMessages peeks at messages without dequeuing them
+func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue string) {
+	query := r.URL.Query()
+	numMessages := 1
+	if n := query.Get("numofmessages"); n != "" {
+		if parsed, err := strconv.Atoi(n); err == nil && parsed > 0 {
+			numMessages = parsed
+		}
+	}
+
+	h.log.Debug("peeking messages", "queue", queue, "numMessages", numMessages)
+
+	// Check if queue exists
+	queueKey := h.queueKey(queue)
+	_, closer, err := h.db.Get(queueKey)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	closer.Close()
+
+	// Get visible messages without modifying them
+	prefix := []byte(fmt.Sprintf("queues/data/%s/", queue))
+	iter, err := h.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: append(prefix, 0xff),
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	defer iter.Close()
+
+	now := time.Now().UTC()
+	var messages []Message
+
+	for iter.First(); iter.Valid() && len(messages) < numMessages; iter.Next() {
+		var msg Message
+		if err := xml.Unmarshal(iter.Value(), &msg); err != nil {
+			continue
+		}
+
+		// Check if message is visible (for peek, we still check visibility)
+		if time.Time(msg.TimeNextVisible).After(now) {
+			continue
+		}
+
+		// Check if message has expired
+		if time.Time(msg.ExpirationTime).Before(now) {
+			h.db.Delete(iter.Key(), pebble.Sync)
+			continue
+		}
+
+		// Do NOT update visibility or dequeue count for peek
+		messages = append(messages, msg)
+	}
+
+	h.log.Debug("messages peeked", "queue", queue, "count", len(messages))
+
+	type QueueMessagesList struct {
+		XMLName      xml.Name  `xml:"QueueMessagesList"`
+		QueueMessage []Message `xml:"QueueMessage"`
+	}
+	response := QueueMessagesList{QueueMessage: messages}
+
+	common.SetResponseHeaders(w, "")
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	xml.NewEncoder(w).Encode(response)
+}
+
+// UpdateMessage updates a message's visibility timeout and/or content
+func (h *Handler) UpdateMessage(w http.ResponseWriter, r *http.Request, queue, messageID string) {
+	popReceipt := r.URL.Query().Get("popreceipt")
+	visibilityTimeout := 30 * time.Second
+	if vt := r.URL.Query().Get("visibilitytimeout"); vt != "" {
+		if parsed, err := strconv.Atoi(vt); err == nil && parsed >= 0 {
+			visibilityTimeout = time.Duration(parsed) * time.Second
+		}
+	}
+
+	h.log.Info("updating message", "queue", queue, "messageId", messageID, "visibilityTimeout", visibilityTimeout)
+
+	key := h.messageKey(queue, messageID)
+
+	// Check if message exists
+	data, closer, err := h.db.Get(key)
+	if err == pebble.ErrNotFound {
+		h.log.Debug("message not found", "queue", queue, "messageId", messageID)
+		h.writeError(w, http.StatusNotFound, "MessageNotFound", "The specified message does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Make copy of data before closing
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
+	// Parse existing message
+	var msg Message
+	if err := xml.Unmarshal(dataCopy, &msg); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Verify pop receipt
+	if popReceipt != "" && msg.PopReceipt != popReceipt {
+		h.writeError(w, http.StatusBadRequest, "PopReceiptMismatch", "The specified pop receipt did not match")
+		return
+	}
+
+	// Parse request body for new message text
+	body, err := io.ReadAll(r.Body)
+	if err == nil && len(body) > 0 {
+		type QueueMessage struct {
+			MessageText string `xml:"MessageText"`
+		}
+		var newMsg QueueMessage
+		if err := xml.Unmarshal(body, &newMsg); err == nil && newMsg.MessageText != "" {
+			msg.MessageText = newMsg.MessageText
+		}
+	}
+
+	// Update visibility and pop receipt
+	now := time.Now().UTC()
+	msg.TimeNextVisible = RFC1123Time(now.Add(visibilityTimeout))
+	msg.PopReceipt = h.generatePopReceipt()
+
+	// Save updated message
+	updatedData, _ := xml.Marshal(msg)
+	if err := h.db.Set(key, updatedData, pebble.Sync); err != nil {
+		h.log.Error("failed to update message", "queue", queue, "messageId", messageID, "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	h.log.Info("message updated", "queue", queue, "messageId", messageID)
+	common.SetResponseHeaders(w, "")
+	w.Header().Set("x-ms-popreceipt", msg.PopReceipt)
+	w.Header().Set("x-ms-time-next-visible", time.Time(msg.TimeNextVisible).UTC().Format(time.RFC1123))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// SetQueueMetadata sets metadata on a queue
+func (h *Handler) SetQueueMetadata(w http.ResponseWriter, r *http.Request, queue string) {
+	h.log.Info("setting queue metadata", "queue", queue)
+
+	key := h.queueKey(queue)
+
+	// Check if queue exists
+	data, closer, err := h.db.Get(key)
+	if err == pebble.ErrNotFound {
+		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Make copy before closing
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
+	// Parse existing metadata
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(dataCopy, &metadata); err != nil {
+		metadata = make(map[string]interface{})
+	}
+
+	// Extract x-ms-meta-* headers
+	userMeta := make(map[string]string)
+	for key, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(key), "x-ms-meta-") {
+			metaKey := strings.TrimPrefix(strings.ToLower(key), "x-ms-meta-")
+			if len(values) > 0 {
+				userMeta[metaKey] = values[0]
+			}
+		}
+	}
+	metadata["userMetadata"] = userMeta
+
+	// Save updated metadata
+	updatedData, _ := json.Marshal(metadata)
+	if err := h.db.Set(key, updatedData, pebble.Sync); err != nil {
+		h.log.Error("failed to set queue metadata", "queue", queue, "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	h.log.Info("queue metadata set", "queue", queue)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusNoContent)
 }
