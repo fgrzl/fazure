@@ -356,20 +356,57 @@ func (t *Table) ListEntities(ctx context.Context) ([]*Entity, error) {
 	return entities, iter.Error()
 }
 
-// QueryEntities queries entities with filters
-func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selectFields []string) ([]*Entity, error) {
-	// For now, just list all and apply simple filtering
-	entities, err := t.ListEntities(ctx)
+// QueryEntities queries entities with filters and pagination
+func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selectFields []string, nextPK, nextRK string) ([]*Entity, string, string, error) {
+	db := t.store.DB()
+	prefix := []byte(fmt.Sprintf("tables/data/%s/", t.name))
+
+	// Set lower bound based on continuation token
+	lowerBound := prefix
+	if nextPK != "" && nextRK != "" {
+		lowerBound = []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, nextPK, nextRK))
+	}
+
+	iter, err := db.NewIter(&pebble.IterOptions{
+		LowerBound: lowerBound,
+		UpperBound: append(prefix, 0xff),
+	})
 	if err != nil {
-		return nil, err
+		return nil, "", "", err
+	}
+	defer iter.Close()
+
+	entities := make([]*Entity, 0)
+	count := 0
+	limit := top
+	if limit <= 0 {
+		limit = 1000 // Default page size
 	}
 
-	// Apply top limit
-	if top > 0 && len(entities) > top {
-		entities = entities[:top]
+	for iter.First(); iter.Valid(); iter.Next() {
+		var entity Entity
+		if err := json.Unmarshal(iter.Value(), &entity); err != nil {
+			continue
+		}
+
+		// Skip the continuation token entity itself (we want to start after it)
+		if nextPK != "" && nextRK != "" && entity.PartitionKey == nextPK && entity.RowKey == nextRK {
+			continue
+		}
+
+		entities = append(entities, &entity)
+		count++
+
+		if count >= limit {
+			// Check if there are more entities
+			if iter.Next() {
+				// Return continuation token
+				lastEntity := entities[len(entities)-1]
+				return entities, lastEntity.PartitionKey, lastEntity.RowKey, nil
+			}
+			break
+		}
 	}
 
-	// TODO: Apply filter and select
-
-	return entities, nil
+	return entities, "", "", iter.Error()
 }

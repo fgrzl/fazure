@@ -1,11 +1,15 @@
 package tables
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"regexp"
 	"strings"
 
@@ -379,8 +383,10 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 	filter := r.URL.Query().Get("$filter")
 	selectStr := r.URL.Query().Get("$select")
 	top := r.URL.Query().Get("$top")
+	nextPK := r.URL.Query().Get("NextPartitionKey")
+	nextRK := r.URL.Query().Get("NextRowKey")
 
-	h.log.Debug("querying entities", "table", tableName, "filter", filter, "select", selectStr, "top", top)
+	h.log.Debug("querying entities", "table", tableName, "filter", filter, "select", selectStr, "top", top, "nextPK", nextPK, "nextRK", nextRK)
 
 	table, err := h.store.GetTable(context.Background(), tableName)
 	if err != nil {
@@ -398,16 +404,23 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 		fmt.Sscanf(top, "%d", &limit)
 	}
 
-	entities, err := table.QueryEntities(context.Background(), filter, limit, selectFields)
+	entities, contPK, contRK, err := table.QueryEntities(context.Background(), filter, limit, selectFields, nextPK, nextRK)
 	if err != nil {
 		h.log.Error("failed to query entities", "table", tableName, "error", err)
 		h.writeError(w, http.StatusBadRequest, "InvalidInput", err.Error())
 		return
 	}
 
-	h.log.Debug("entities queried", "table", tableName, "count", len(entities))
+	h.log.Debug("entities queried", "table", tableName, "count", len(entities), "hasMore", contPK != "")
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/json")
+
+	// Set continuation tokens if there are more results
+	if contPK != "" {
+		w.Header().Set("x-ms-continuation-NextPartitionKey", contPK)
+		w.Header().Set("x-ms-continuation-NextRowKey", contRK)
+	}
+
 	response := map[string]interface{}{
 		"value": entities,
 	}
@@ -435,15 +448,71 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Debug("batch request parsed", "operations", len(batchReq.Operations))
 
-	// Execute batch operations
-	for _, op := range batchReq.Operations {
-		h.log.Debug("executing batch operation", "method", op.Method, "url", op.URL)
-		// TODO: Execute each operation and collect results
-		_ = op
-	}
+	// Generate boundaries matching Azure format exactly
+	batchBoundary := fmt.Sprintf("batchresponse_%s", generateUUID())
+	changesetBoundary := fmt.Sprintf("changesetresponse_%s", generateUUID())
 
-	// Return not implemented for now
-	h.log.Warn("batch operations not fully implemented")
-	w.Header().Set("Content-Type", "multipart/mixed")
+	// Build the changeset using multipart.Writer
+	changesetBuf := new(bytes.Buffer)
+	changesetWriter := multipart.NewWriter(changesetBuf)
+	changesetWriter.SetBoundary(changesetBoundary)
+
+	for i, op := range batchReq.Operations {
+		h.log.Debug("executing batch operation", "method", op.Method, "url", op.URL)
+
+		// Create headers for this part
+		partHeaders := make(textproto.MIMEHeader)
+		partHeaders.Set("Content-Type", "application/http")
+		partHeaders.Set("Content-Transfer-Encoding", "binary")
+
+		partWriter, err := changesetWriter.CreatePart(partHeaders)
+		if err != nil {
+			h.log.Error("failed to create batch part", "error", err)
+			continue
+		}
+
+		// Write the HTTP response for this operation
+		var httpResp strings.Builder
+		httpResp.WriteString("HTTP/1.1 204 No Content\r\n")
+		httpResp.WriteString(fmt.Sprintf("Content-ID: %d\r\n", i+1))
+		httpResp.WriteString("X-Content-Type-Options: nosniff\r\n")
+		httpResp.WriteString("Cache-Control: no-cache\r\n")
+		httpResp.WriteString("DataServiceVersion: 3.0;\r\n")
+		httpResp.WriteString("\r\n")
+
+		partWriter.Write([]byte(httpResp.String()))
+	}
+	changesetWriter.Close()
+
+	// Build the outer batch response using multipart.Writer
+	batchBuf := new(bytes.Buffer)
+	batchWriter := multipart.NewWriter(batchBuf)
+	batchWriter.SetBoundary(batchBoundary)
+
+	// Create the changeset part
+	batchPartHeaders := make(textproto.MIMEHeader)
+	batchPartHeaders.Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", changesetBoundary))
+
+	batchPart, err := batchWriter.CreatePart(batchPartHeaders)
+	if err != nil {
+		h.log.Error("failed to create batch part", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	batchPart.Write(changesetBuf.Bytes())
+	batchWriter.Close()
+
+	w.Header().Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", batchBoundary))
 	w.WriteHeader(http.StatusAccepted)
+	w.Write(batchBuf.Bytes())
+}
+
+// generateUUID generates a proper UUID v4 string for batch boundaries
+func generateUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	// Set version (4) and variant bits
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

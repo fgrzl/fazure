@@ -1,10 +1,13 @@
 package tables
 
 import (
+	"bufio"
+	"bytes"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strings"
 )
 
 // BatchRequest represents a batch request
@@ -63,8 +66,67 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 			return nil, err
 		}
 
-		// TODO: Parse individual operations from multipart
-		// Each part contains an HTTP request
+		// Read part content type to check if it's a changeset
+		partContentType := part.Header.Get("Content-Type")
+		if strings.Contains(partContentType, "multipart/mixed") {
+			// This is a changeset, parse its inner operations
+			_, changesetParams, err := mime.ParseMediaType(partContentType)
+			if err != nil {
+				part.Close()
+				continue
+			}
+			changesetBoundary := changesetParams["boundary"]
+			if changesetBoundary == "" {
+				part.Close()
+				continue
+			}
+
+			// Read the part content into a buffer
+			partContent, err := io.ReadAll(part)
+			if err != nil {
+				part.Close()
+				continue
+			}
+
+			// Parse the changeset as multipart
+			changesetReader := multipart.NewReader(bytes.NewReader(partContent), changesetBoundary)
+			for {
+				opPart, err := changesetReader.NextPart()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					continue
+				}
+
+				// Each operation part contains an HTTP request
+				opContent, err := io.ReadAll(opPart)
+				if err != nil {
+					opPart.Close()
+					continue
+				}
+
+				// Parse the HTTP request from the content
+				httpReq, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(opContent)))
+				if err != nil {
+					opPart.Close()
+					continue
+				}
+
+				body, _ := io.ReadAll(httpReq.Body)
+				httpReq.Body.Close()
+
+				op := BatchOperation{
+					Method:  httpReq.Method,
+					URL:     httpReq.URL.String(),
+					Headers: httpReq.Header,
+					Body:    body,
+				}
+				batchReq.Operations = append(batchReq.Operations, op)
+
+				opPart.Close()
+			}
+		}
 
 		part.Close()
 	}

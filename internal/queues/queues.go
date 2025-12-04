@@ -1,7 +1,6 @@
 package queues
 
 import (
-	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -21,15 +20,35 @@ type Handler struct {
 	log *slog.Logger
 }
 
+// RFC1123Time wraps time.Time to marshal/unmarshal using RFC1123 format (Azure requirement)
+type RFC1123Time time.Time
+
+func (t RFC1123Time) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	return e.EncodeElement(time.Time(t).UTC().Format(time.RFC1123), start)
+}
+
+func (t *RFC1123Time) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	var s string
+	if err := d.DecodeElement(&s, &start); err != nil {
+		return err
+	}
+	parsed, err := time.Parse(time.RFC1123, s)
+	if err != nil {
+		return err
+	}
+	*t = RFC1123Time(parsed)
+	return nil
+}
+
 // Message represents a queue message
 type Message struct {
-	MessageID       string    `xml:"MessageId"`
-	InsertionTime   time.Time `xml:"InsertionTime"`
-	ExpirationTime  time.Time `xml:"ExpirationTime"`
-	PopReceipt      string    `xml:"PopReceipt"`
-	TimeNextVisible time.Time `xml:"TimeNextVisible"`
-	DequeueCount    int       `xml:"DequeueCount"`
-	MessageText     string    `xml:"MessageText"`
+	MessageID       string      `xml:"MessageId"`
+	InsertionTime   RFC1123Time `xml:"InsertionTime"`
+	ExpirationTime  RFC1123Time `xml:"ExpirationTime"`
+	PopReceipt      string      `xml:"PopReceipt"`
+	TimeNextVisible RFC1123Time `xml:"TimeNextVisible"`
+	DequeueCount    int         `xml:"DequeueCount"`
+	MessageText     string      `xml:"MessageText"`
 }
 
 // NewHandler creates a new queue handler
@@ -337,12 +356,12 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 	now := time.Now().UTC()
 	message := Message{
 		MessageID:       messageID,
-		InsertionTime:   now,
-		ExpirationTime:  now.Add(7 * 24 * time.Hour), // Default 7 days
+		InsertionTime:   RFC1123Time(now),
+		ExpirationTime:  RFC1123Time(now.Add(7 * 24 * time.Hour)), // Default 7 days
 		PopReceipt:      h.generatePopReceipt(),
-		TimeNextVisible: now,
+		TimeNextVisible: RFC1123Time(now),
 		DequeueCount:    0,
-		MessageText:     base64.StdEncoding.EncodeToString([]byte(msg.MessageText)),
+		MessageText:     msg.MessageText, // SDK already base64 encodes, don't double encode
 	}
 
 	// Store message
@@ -423,12 +442,12 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 		}
 
 		// Check if message is visible
-		if msg.TimeNextVisible.After(now) {
+		if time.Time(msg.TimeNextVisible).After(now) {
 			continue
 		}
 
 		// Check if message has expired
-		if msg.ExpirationTime.Before(now) {
+		if time.Time(msg.ExpirationTime).Before(now) {
 			h.db.Delete(iter.Key(), pebble.Sync)
 			continue
 		}
@@ -436,7 +455,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 		// Update message visibility
 		msg.DequeueCount++
 		msg.PopReceipt = h.generatePopReceipt()
-		msg.TimeNextVisible = now.Add(visibilityTimeout)
+		msg.TimeNextVisible = RFC1123Time(now.Add(visibilityTimeout))
 
 		// Save updated message
 		data, _ := xml.Marshal(msg)

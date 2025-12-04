@@ -1,6 +1,7 @@
 package blobs
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -309,10 +310,22 @@ func (h *Handler) PutBlob(w http.ResponseWriter, r *http.Request, container, blo
 		contentType = "application/octet-stream"
 	}
 	etag := common.GenerateETag(data)
-	metadata := fmt.Sprintf(`{"contentType":"%s","contentLength":%d,"etag":"%s","created":"%s"}`,
-		contentType, len(data), etag, time.Now().UTC().Format(time.RFC3339))
+
+	// Use json.Marshal to properly encode the metadata
+	metadataStruct := struct {
+		ContentType   string `json:"contentType"`
+		ContentLength int    `json:"contentLength"`
+		ETag          string `json:"etag"`
+		Created       string `json:"created"`
+	}{
+		ContentType:   contentType,
+		ContentLength: len(data),
+		ETag:          etag,
+		Created:       time.Now().UTC().Format(time.RFC3339),
+	}
+	metadataBytes, _ := json.Marshal(metadataStruct)
 	metaKey := h.blobMetaKey(container, blob)
-	if err := h.db.Set(metaKey, []byte(metadata), pebble.Sync); err != nil {
+	if err := h.db.Set(metaKey, metadataBytes, pebble.Sync); err != nil {
 		h.log.Error("failed to store blob metadata", "container", container, "blob", blob, "error", err)
 	}
 
@@ -343,9 +356,35 @@ func (h *Handler) GetBlob(w http.ResponseWriter, r *http.Request, container, blo
 	blobData := make([]byte, len(data))
 	copy(blobData, data)
 
+	// Get metadata for ETag and content type
+	metaKey := h.blobMetaKey(container, blob)
+	metaData, metaCloser, metaErr := h.db.Get(metaKey)
+	etag := ""
+	contentType := "application/octet-stream"
+	if metaErr == nil {
+		// Make a copy of metadata before using it
+		metaDataCopy := make([]byte, len(metaData))
+		copy(metaDataCopy, metaData)
+		metaCloser.Close()
+
+		var meta struct {
+			ETag        string `json:"etag"`
+			ContentType string `json:"contentType"`
+		}
+		if json.Unmarshal(metaDataCopy, &meta) == nil {
+			etag = meta.ETag
+			if meta.ContentType != "" {
+				contentType = meta.ContentType
+			}
+		}
+		h.log.Debug("blob metadata retrieved", "container", container, "blob", blob, "etag", etag, "contentType", contentType)
+	} else {
+		h.log.Debug("blob metadata not found", "container", container, "blob", blob, "error", metaErr)
+	}
+
 	h.log.Debug("blob downloaded", "container", container, "blob", blob, "size", len(blobData))
-	common.SetResponseHeaders(w, "")
-	common.SetBlobHeaders(w, "application/octet-stream", int64(len(blobData)))
+	common.SetResponseHeaders(w, etag)
+	common.SetBlobHeaders(w, contentType, int64(len(blobData)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(blobData)
 }
@@ -366,8 +405,28 @@ func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 	}
 	defer closer.Close()
 
-	common.SetResponseHeaders(w, "")
-	common.SetBlobHeaders(w, "application/octet-stream", int64(len(data)))
+	// Get metadata for ETag
+	metaKey := h.blobMetaKey(container, blob)
+	metaData, metaCloser, err := h.db.Get(metaKey)
+	etag := ""
+	contentType := "application/octet-stream"
+	if err == nil {
+		defer metaCloser.Close()
+		// Parse metadata JSON to extract ETag and content type
+		var meta struct {
+			ETag        string `json:"etag"`
+			ContentType string `json:"contentType"`
+		}
+		if json.Unmarshal(metaData, &meta) == nil {
+			etag = meta.ETag
+			if meta.ContentType != "" {
+				contentType = meta.ContentType
+			}
+		}
+	}
+
+	common.SetResponseHeaders(w, etag)
+	common.SetBlobHeaders(w, contentType, int64(len(data)))
 	w.WriteHeader(http.StatusOK)
 }
 

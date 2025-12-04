@@ -169,7 +169,8 @@ func TestShouldUpdateEntityGivenExistingEntityWhenCallingUpdateEntity(t *testing
 	require.NoError(t, err)
 
 	_, err = client.UpdateEntity(ctx, updatedMarshalled, &aztables.UpdateEntityOptions{
-		IfMatch: &addResp.ETag,
+		IfMatch:    &addResp.ETag,
+		UpdateMode: aztables.UpdateModeReplace,
 	})
 	require.NoError(t, err, "UpdateEntity should succeed")
 }
