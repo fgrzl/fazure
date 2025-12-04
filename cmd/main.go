@@ -48,12 +48,12 @@ func main() {
 	blobHandler := blobs.NewHandler(db, logger)
 	queueHandler := queues.NewHandler(db, logger)
 
-	// Initialize table store
+	// Initialize table store and handler
 	tableStore, err := tables.NewTableStore(store)
 	if err != nil {
 		log.Fatalf("Failed to initialize table storage: %v", err)
 	}
-	tables.SetStore(tableStore)
+	tableHandler := tables.NewHandler(tableStore, logger)
 
 	// Create main mux
 	mux := http.NewServeMux()
@@ -70,43 +70,53 @@ func main() {
 	// Register queue routes
 	queueHandler.RegisterRoutes(mux)
 
-	// Azure Table Storage API endpoints
-	// https://learn.microsoft.com/en-us/rest/api/storageservices/table-service-rest-api
-	tables.RegisterRoutes(mux)
+	// Register table routes
+	tableHandler.RegisterRoutes(mux)
 
 	// Dispatcher for storage operations
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Dispatch to the appropriate handler based on path and query parameters
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
+		query := r.URL.RawQuery
 
 		// If first part is account name, it's a storage service request
 		if len(parts) > 0 && parts[0] == "devstoreaccount1" {
 			// Route to handlers based on path structure
 			if len(parts) == 1 || (len(parts) == 2 && parts[1] == "") {
 				// Account-level operation (listing or root)
-				if strings.Contains(r.URL.RawQuery, "comp=list") {
-					blobHandler.HandleRequest(w, r)
-				} else {
-					blobHandler.HandleRequest(w, r)
-				}
+				blobHandler.HandleRequest(w, r)
 			} else if len(parts) >= 2 {
 				// Determine service by path depth and query params
-				// Tables are: /devstoreaccount1/Tables or /devstoreaccount1/TableName
-				// Queues are: /devstoreaccount1/queuename
+				// Tables are: /devstoreaccount1/Tables or /devstoreaccount1/TableName(...)
+				// Queues are: /devstoreaccount1/queuename/messages
 				// Blobs are: /devstoreaccount1/containername/blobname
 
 				secondPart := strings.ToLower(parts[1])
-				if secondPart == "tables" {
-					// Table Service request
-					tables.HandleRequest(w, r)
-				} else if strings.Contains(r.URL.RawQuery, "comp=queue") || r.Method == "POST" && strings.Contains(r.URL.RawQuery, "messages") {
-					// Queue operation
-					queueHandler.HandleRequest(w, r)
-				} else {
-					// Default to blob (containers or blobs)
-					blobHandler.HandleRequest(w, r)
+
+				// Check for table operations
+				if secondPart == "tables" || strings.HasPrefix(secondPart, "tables(") || secondPart == "$batch" {
+					tableHandler.HandleRequest(w, r)
+					return
 				}
+
+				// Check for queue operations
+				// Queues have /messages path or comp=list query with queue patterns
+				if len(parts) >= 3 && parts[2] == "messages" {
+					queueHandler.HandleRequest(w, r)
+					return
+				}
+
+				// Check for queue list operation
+				if strings.Contains(query, "comp=list") && !strings.Contains(query, "restype=container") {
+					// Could be queue list - check if it looks like a queue request
+					// Azure Queues use /{account}?comp=list format
+					queueHandler.HandleRequest(w, r)
+					return
+				}
+
+				// Default to blob (containers or blobs)
+				blobHandler.HandleRequest(w, r)
 			}
 		} else {
 			// Unknown request, try blob as default

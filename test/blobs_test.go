@@ -15,11 +15,6 @@ const (
 	blobAccountName = "devstoreaccount1"
 )
 
-func skipBlobIfNotRunning(t *testing.T) {
-	t.Helper()
-	// Tests will fail naturally if server is not running
-}
-
 func newBlobServiceClient(t *testing.T) *azblob.Client {
 	client, err := azblob.NewClientWithNoCredential(
 		blobEmulatorURL+"/"+blobAccountName, nil,
@@ -33,7 +28,6 @@ func newBlobServiceClient(t *testing.T) *azblob.Client {
 // ============================================================================
 
 func TestShouldCreateContainerGivenValidNameWhenCallingCreateContainer(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
@@ -47,7 +41,6 @@ func TestShouldCreateContainerGivenValidNameWhenCallingCreateContainer(t *testin
 }
 
 func TestShouldListContainersGivenMultipleContainersWhenCallingListContainers(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
@@ -76,8 +69,6 @@ func TestShouldListContainersGivenMultipleContainersWhenCallingListContainers(t 
 // ============================================================================
 
 func TestShouldUploadBlobGivenValidBlobDataWhenCallingUploadBlob(t *testing.T) {
-	skipBlobIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-upload"
@@ -95,7 +86,6 @@ func TestShouldUploadBlobGivenValidBlobDataWhenCallingUploadBlob(t *testing.T) {
 }
 
 func TestShouldDownloadBlobGivenExistingBlobWhenCallingDownloadBlob(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
@@ -122,7 +112,6 @@ func TestShouldDownloadBlobGivenExistingBlobWhenCallingDownloadBlob(t *testing.T
 }
 
 func TestShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
@@ -143,7 +132,6 @@ func TestShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob(t *testing.T) {
 }
 
 func TestShouldListBlobsGivenMultipleBlobsWhenCallingListBlobs(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
@@ -173,7 +161,6 @@ func TestShouldListBlobsGivenMultipleBlobsWhenCallingListBlobs(t *testing.T) {
 }
 
 func TestShouldGetBlobPropertiesGivenExistingBlobWhenCallingGetBlobProperties(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
@@ -199,7 +186,6 @@ func TestShouldGetBlobPropertiesGivenExistingBlobWhenCallingGetBlobProperties(t 
 }
 
 func TestShouldSetBlobMetadataGivenExistingBlobWhenCallingSetBlobMetadata(t *testing.T) {
-	skipBlobIfNotRunning(t)
 
 	ctx := context.Background()
 	client := newBlobServiceClient(t)

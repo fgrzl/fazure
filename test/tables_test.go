@@ -16,11 +16,6 @@ const (
 	tableAccountName = "devstoreaccount1"
 )
 
-func skipTablesIfNotRunning(t *testing.T) {
-	t.Helper()
-	// Tests will fail naturally if server is not running
-}
-
 func newServiceClient(t *testing.T) *aztables.ServiceClient {
 	client, err := aztables.NewServiceClientWithNoCredential(
 		tableEmulatorURL+"/"+tableAccountName, nil,
@@ -39,8 +34,6 @@ func newTableClient(t *testing.T, tableName string) *aztables.Client {
 // ============================================================================
 
 func TestShouldCreateTableGivenValidNameWhenCallingCreateTable(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testcreatetable")
 
@@ -54,8 +47,6 @@ func TestShouldCreateTableGivenValidNameWhenCallingCreateTable(t *testing.T) {
 }
 
 func TestShouldInsertEntityGivenNewPKRKWhenCallingAddEntity(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testinsertentity")
 	_, _ = client.CreateTable(ctx, nil)
@@ -78,8 +69,6 @@ func TestShouldInsertEntityGivenNewPKRKWhenCallingAddEntity(t *testing.T) {
 }
 
 func TestShouldDetectConflictGivenExistingEntityWhenCallingAddEntity(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testconflict")
 	_, _ = client.CreateTable(ctx, nil)
@@ -105,8 +94,6 @@ func TestShouldDetectConflictGivenExistingEntityWhenCallingAddEntity(t *testing.
 }
 
 func TestShouldGetEntityGivenExistingPKRKWhenCallingGetEntity(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testgetentity")
 	_, _ = client.CreateTable(ctx, nil)
@@ -140,8 +127,6 @@ func TestShouldGetEntityGivenExistingPKRKWhenCallingGetEntity(t *testing.T) {
 }
 
 func TestShouldReturnNotFoundGivenNonExistentPKRKWhenCallingGetEntity(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testnotfound")
 	_, _ = client.CreateTable(ctx, nil)
@@ -154,8 +139,6 @@ func TestShouldReturnNotFoundGivenNonExistentPKRKWhenCallingGetEntity(t *testing
 }
 
 func TestShouldUpdateEntityGivenExistingEntityWhenCallingUpdateEntity(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testupdateentity")
 	_, _ = client.CreateTable(ctx, nil)
@@ -192,8 +175,6 @@ func TestShouldUpdateEntityGivenExistingEntityWhenCallingUpdateEntity(t *testing
 }
 
 func TestShouldDeleteEntityGivenValidPKRKWhenCallingDeleteEntity(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testdeleteentity")
 	_, _ = client.CreateTable(ctx, nil)
@@ -218,8 +199,6 @@ func TestShouldDeleteEntityGivenValidPKRKWhenCallingDeleteEntity(t *testing.T) {
 }
 
 func TestShouldQueryEntitiesGivenFilterWhenCallingListEntities(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testqueryentities")
 	_, _ = client.CreateTable(ctx, nil)
@@ -262,8 +241,6 @@ func TestShouldQueryEntitiesGivenFilterWhenCallingListEntities(t *testing.T) {
 }
 
 func TestShouldReturnContinuationTokensGivenLargeResultSetWhenCallingListEntities(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testcontinuation")
 	_, _ = client.CreateTable(ctx, nil)
@@ -304,8 +281,6 @@ func TestShouldReturnContinuationTokensGivenLargeResultSetWhenCallingListEntitie
 }
 
 func TestShouldExecuteBatchGivenValidOpsWhenCallingSubmitTransaction(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testbatch")
 	_, _ = client.CreateTable(ctx, nil)
@@ -341,8 +316,6 @@ func TestShouldExecuteBatchGivenValidOpsWhenCallingSubmitTransaction(t *testing.
 }
 
 func TestShouldFailBatchGivenMixedPartitionKeysWhenCallingSubmitTransaction(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testbatchpk")
 	_, _ = client.CreateTable(ctx, nil)
@@ -376,8 +349,6 @@ func TestShouldFailBatchGivenMixedPartitionKeysWhenCallingSubmitTransaction(t *t
 }
 
 func TestShouldBeAtomicGivenOneOperationFailsWhenCallingSubmitTransaction(t *testing.T) {
-	skipTablesIfNotRunning(t)
-
 	ctx := context.Background()
 	client := newTableClient(t, "testbatchatomic")
 	_, _ = client.CreateTable(ctx, nil)

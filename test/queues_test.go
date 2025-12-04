@@ -15,17 +15,10 @@ const (
 	queueAccountName = "devstoreaccount1"
 )
 
-func skipQueueIfNotRunning(t *testing.T) {
-	t.Helper()
-	// Tests will fail naturally if server is not running
-}
-
 // ============================================================================
 // ShouldCreateQueueGivenValidNameWhenCallingCreateQueue
 // ============================================================================
 func TestShouldCreateQueueGivenValidNameWhenCallingCreateQueue(t *testing.T) {
-	skipQueueIfNotRunning(t)
-
 	// Arrange
 	ctx := context.Background()
 	client, err := azqueue.NewServiceClientWithNoCredential(queueEmulatorURL+"/"+queueAccountName, nil)
@@ -47,8 +40,6 @@ func TestShouldCreateQueueGivenValidNameWhenCallingCreateQueue(t *testing.T) {
 // ShouldEnqueueMessageGivenExistingQueueWhenCallingEnqueue
 // ============================================================================
 func TestShouldEnqueueMessageGivenExistingQueueWhenCallingEnqueue(t *testing.T) {
-	skipQueueIfNotRunning(t)
-
 	// Arrange
 	ctx := context.Background()
 	service, err := azqueue.NewServiceClientWithNoCredential(queueEmulatorURL+"/"+queueAccountName, nil)
@@ -72,8 +63,6 @@ func TestShouldEnqueueMessageGivenExistingQueueWhenCallingEnqueue(t *testing.T) 
 // ShouldDequeueMessageGivenExistingQueueWhenCallingDequeue
 // ============================================================================
 func TestShouldDequeueMessageGivenExistingQueueWhenCallingDequeue(t *testing.T) {
-	skipQueueIfNotRunning(t)
-
 	// Arrange
 	ctx := context.Background()
 	service, err := azqueue.NewServiceClientWithNoCredential(queueEmulatorURL+"/"+queueAccountName, nil)
@@ -103,8 +92,6 @@ func TestShouldDequeueMessageGivenExistingQueueWhenCallingDequeue(t *testing.T) 
 // ShouldRespectVisibilityTimeoutGivenMessageDequeuedWhenCallingDequeueAgain
 // ============================================================================
 func TestShouldRespectVisibilityTimeoutGivenMessageDequeuedWhenCallingDequeueAgain(t *testing.T) {
-	skipQueueIfNotRunning(t)
-
 	// Arrange
 	ctx := context.Background()
 	service, err := azqueue.NewServiceClientWithNoCredential(queueEmulatorURL+"/"+queueAccountName, nil)
@@ -146,8 +133,6 @@ func TestShouldRespectVisibilityTimeoutGivenMessageDequeuedWhenCallingDequeueAga
 // ShouldDeleteMessageGivenValidPopReceiptWhenCallingDeleteMessage
 // ============================================================================
 func TestShouldDeleteMessageGivenValidPopReceiptWhenCallingDeleteMessage(t *testing.T) {
-	skipQueueIfNotRunning(t)
-
 	// Arrange
 	ctx := context.Background()
 	service, err := azqueue.NewServiceClientWithNoCredential(queueEmulatorURL+"/"+queueAccountName, nil)
@@ -183,8 +168,6 @@ func TestShouldDeleteMessageGivenValidPopReceiptWhenCallingDeleteMessage(t *test
 // ShouldClearMessagesGivenQueueWithMessagesWhenCallingClear
 // ============================================================================
 func TestShouldClearMessagesGivenQueueWithMessagesWhenCallingClear(t *testing.T) {
-	skipQueueIfNotRunning(t)
-
 	// Arrange
 	ctx := context.Background()
 	service, err := azqueue.NewServiceClientWithNoCredential(queueEmulatorURL+"/"+queueAccountName, nil)
