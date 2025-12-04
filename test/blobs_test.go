@@ -239,10 +239,11 @@ func TestShouldSetBlobMetadataGivenExistingBlobWhenCallingSetBlobMetadata(t *tes
 	require.NoError(t, err, "SetMetadata should succeed")
 
 	// Get properties to verify metadata
+	// Note: HTTP header names are canonicalized to Title-Case, so "key1" becomes "Key1"
 	props, err := blobClient.GetProperties(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "value1", *props.Metadata["key1"])
-	assert.Equal(t, "value2", *props.Metadata["key2"])
+	assert.Equal(t, "value1", *props.Metadata["Key1"])
+	assert.Equal(t, "value2", *props.Metadata["Key2"])
 }
 
 func ptrString(s string) *string { return &s }
@@ -488,10 +489,10 @@ func TestShouldSetContainerMetadataGivenExistingContainerWhenCallingSetMetadata(
 	_, err = containerClient.SetMetadata(ctx, &container.SetMetadataOptions{Metadata: metadata})
 	require.NoError(t, err, "SetMetadata should succeed")
 
-	// Verify
+	// Verify - HTTP header names are canonicalized to Title-Case
 	props, err := containerClient.GetProperties(ctx, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "test", *props.Metadata["env"])
+	assert.Equal(t, "test", *props.Metadata["Env"])
 }
 
 // ============================================================================

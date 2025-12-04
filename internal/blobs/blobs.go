@@ -95,6 +95,9 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 				h.ListBlobs(w, r, container)
 			} else if query.Get("restype") == "container" && query.Get("comp") == "acl" {
 				h.GetContainerACL(w, r, container)
+			} else if query.Get("restype") == "container" || query.Get("comp") == "" {
+				// Get container properties (similar to HEAD)
+				h.GetContainerProperties(w, r, container)
 			} else {
 				h.writeError(w, http.StatusBadRequest, "InvalidQueryParameterValue", "Invalid query parameters")
 			}
@@ -185,6 +188,8 @@ type BlobMetadata struct {
 	Modified      time.Time         `json:"modified"`
 	FilePath      string            `json:"filePath"` // Path to actual blob data
 	UserMetadata  map[string]string `json:"userMetadata,omitempty"`
+	LeaseID       string            `json:"leaseId,omitempty"`
+	LeaseExpiry   time.Time         `json:"leaseExpiry,omitempty"`
 }
 
 // CreateContainer creates a new blob container
@@ -284,7 +289,7 @@ func (h *Handler) GetContainerProperties(w http.ResponseWriter, r *http.Request,
 	h.log.Debug("getting container properties", "container", container)
 
 	key := h.containerKey(container)
-	_, closer, err := h.db.Get(key)
+	data, closer, err := h.db.Get(key)
 	if err == pebble.ErrNotFound {
 		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
 		return
@@ -293,7 +298,21 @@ func (h *Handler) GetContainerProperties(w http.ResponseWriter, r *http.Request,
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 	closer.Close()
+
+	// Parse container metadata to return user metadata headers
+	var meta map[string]interface{}
+	if err := json.Unmarshal(dataCopy, &meta); err == nil {
+		if userMeta, ok := meta["userMetadata"].(map[string]interface{}); ok {
+			for key, value := range userMeta {
+				if strVal, ok := value.(string); ok {
+					w.Header().Set("x-ms-meta-"+key, strVal)
+				}
+			}
+		}
+	}
 
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusOK)
@@ -353,6 +372,32 @@ func (h *Handler) PutBlob(w http.ResponseWriter, r *http.Request, container, blo
 		return
 	}
 	closer.Close()
+
+	// Check If-Match header for conditional update
+	ifMatch := r.Header.Get("If-Match")
+	if ifMatch != "" && ifMatch != "*" {
+		metaKey := h.blobMetaKey(container, blob)
+		existingData, existingCloser, err := h.db.Get(metaKey)
+		if err == nil {
+			existingDataCopy := make([]byte, len(existingData))
+			copy(existingDataCopy, existingData)
+			existingCloser.Close()
+
+			var existingMeta BlobMetadata
+			if err := json.Unmarshal(existingDataCopy, &existingMeta); err == nil {
+				// Strip quotes from If-Match header if present
+				cleanIfMatch := strings.Trim(ifMatch, "\"")
+				cleanETag := strings.Trim(existingMeta.ETag, "\"")
+				if cleanIfMatch != cleanETag {
+					h.writeError(w, http.StatusPreconditionFailed, "ConditionNotMet", "The condition specified using HTTP conditional header(s) is not met")
+					return
+				}
+			}
+		} else if err != pebble.ErrNotFound {
+			h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
+	}
 
 	// Read blob data
 	data, err := io.ReadAll(r.Body)
@@ -520,6 +565,7 @@ func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 
 	common.SetResponseHeaders(w, meta.ETag)
 	common.SetBlobHeaders(w, meta.ContentType, meta.ContentLength)
+	w.Header().Set("x-ms-blob-type", "BlockBlob")
 
 	// Return user metadata as x-ms-meta-* headers
 	for key, value := range meta.UserMetadata {
@@ -553,8 +599,23 @@ func (h *Handler) DeleteBlob(w http.ResponseWriter, r *http.Request, container, 
 	closer.Close()
 
 	var meta BlobMetadata
-	if err := json.Unmarshal(metaDataCopy, &meta); err == nil && meta.FilePath != "" {
-		// Delete the blob file from filesystem
+	if err := json.Unmarshal(metaDataCopy, &meta); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Check for active lease
+	if meta.LeaseID != "" && time.Now().Before(meta.LeaseExpiry) {
+		// Lease is active - check if correct lease ID was provided
+		providedLeaseID := r.Header.Get("x-ms-lease-id")
+		if providedLeaseID != meta.LeaseID {
+			h.writeError(w, http.StatusPreconditionFailed, "LeaseIdMismatchWithBlobOperation", "The lease ID specified did not match the lease ID for the blob")
+			return
+		}
+	}
+
+	// Delete the blob file from filesystem
+	if meta.FilePath != "" {
 		if err := os.Remove(meta.FilePath); err != nil && !os.IsNotExist(err) {
 			h.log.Error("failed to delete blob file", "path", meta.FilePath, "error", err)
 		}
@@ -803,8 +864,11 @@ func (h *Handler) SetBlobMetadata(w http.ResponseWriter, r *http.Request, contai
 		meta.UserMetadata = make(map[string]string)
 	}
 	for key, values := range r.Header {
-		if strings.HasPrefix(strings.ToLower(key), "x-ms-meta-") {
-			metaKey := strings.TrimPrefix(strings.ToLower(key), "x-ms-meta-")
+		lowerKey := strings.ToLower(key)
+		if strings.HasPrefix(lowerKey, "x-ms-meta-") {
+			// Get the metadata key - key is canonicalized so "x-ms-meta-key1" becomes "X-Ms-Meta-Key1"
+			// We need to extract after the prefix (10 characters)
+			metaKey := strings.ToLower(key[len("X-Ms-Meta-"):])
 			if len(values) > 0 {
 				meta.UserMetadata[metaKey] = values[0]
 			}
@@ -874,7 +938,7 @@ func (h *Handler) SetContainerACL(w http.ResponseWriter, r *http.Request, contai
 	h.log.Info("setting container ACL", "container", container)
 
 	key := h.containerKey(container)
-	_, closer, err := h.db.Get(key)
+	data, closer, err := h.db.Get(key)
 	if err == pebble.ErrNotFound {
 		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
 		return
@@ -883,9 +947,29 @@ func (h *Handler) SetContainerACL(w http.ResponseWriter, r *http.Request, contai
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 	closer.Close()
 
-	// For now, just acknowledge the request (ACL not fully implemented)
+	// Parse the existing container metadata
+	var meta map[string]interface{}
+	if err := json.Unmarshal(dataCopy, &meta); err != nil {
+		meta = make(map[string]interface{})
+	}
+
+	// Store the public access level from the header
+	accessLevel := r.Header.Get("x-ms-blob-public-access")
+	if accessLevel != "" {
+		meta["publicAccess"] = accessLevel
+	}
+
+	// Save updated metadata
+	metadataBytes, _ := json.Marshal(meta)
+	if err := h.db.Set(key, metadataBytes, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusOK)
 }
@@ -895,7 +979,7 @@ func (h *Handler) GetContainerACL(w http.ResponseWriter, r *http.Request, contai
 	h.log.Debug("getting container ACL", "container", container)
 
 	key := h.containerKey(container)
-	_, closer, err := h.db.Get(key)
+	data, closer, err := h.db.Get(key)
 	if err == pebble.ErrNotFound {
 		h.writeError(w, http.StatusNotFound, "ContainerNotFound", "The specified container does not exist")
 		return
@@ -904,7 +988,17 @@ func (h *Handler) GetContainerACL(w http.ResponseWriter, r *http.Request, contai
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 	closer.Close()
+
+	// Parse container metadata to get public access level
+	var meta map[string]interface{}
+	if err := json.Unmarshal(dataCopy, &meta); err == nil {
+		if access, ok := meta["publicAccess"].(string); ok && access != "" {
+			w.Header().Set("x-ms-blob-public-access", access)
+		}
+	}
 
 	type SignedIdentifiers struct {
 		XMLName xml.Name `xml:"SignedIdentifiers"`
@@ -946,7 +1040,8 @@ func (h *Handler) CreateSnapshot(w http.ResponseWriter, r *http.Request, contain
 // LeaseBlob handles lease operations on a blob
 func (h *Handler) LeaseBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
 	leaseAction := r.Header.Get("x-ms-lease-action")
-	h.log.Info("lease blob", "container", container, "blob", blob, "action", leaseAction)
+	leaseDurationHeader := r.Header.Get("x-ms-lease-duration")
+	h.log.Info("lease blob", "container", container, "blob", blob, "action", leaseAction, "duration", leaseDurationHeader)
 
 	// Get blob metadata
 	metaKey := h.blobMetaKey(container, blob)
@@ -968,17 +1063,73 @@ func (h *Handler) LeaseBlob(w http.ResponseWriter, r *http.Request, container, b
 
 	switch leaseAction {
 	case "acquire":
-		// Generate lease ID
+		// Check if there's an active lease
+		if meta.LeaseID != "" && time.Now().Before(meta.LeaseExpiry) {
+			h.writeError(w, http.StatusConflict, "LeaseAlreadyPresent", "There is already a lease present")
+			return
+		}
+
+		// Parse lease duration (default 60s, -1 means infinite)
+		leaseDuration := 60 * time.Second
+		if leaseDurationHeader != "" && leaseDurationHeader != "-1" {
+			if d, err := strconv.Atoi(leaseDurationHeader); err == nil {
+				leaseDuration = time.Duration(d) * time.Second
+			}
+		} else if leaseDurationHeader == "-1" {
+			leaseDuration = 365 * 24 * time.Hour // "infinite" lease
+		}
+
+		// Generate and store lease ID
 		leaseID := fmt.Sprintf("lease-%d", time.Now().UnixNano())
+		meta.LeaseID = leaseID
+		meta.LeaseExpiry = time.Now().Add(leaseDuration)
+
+		// Save updated metadata
+		metadataBytes, _ := json.Marshal(meta)
+		if err := h.db.Set(metaKey, metadataBytes, pebble.Sync); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
+
 		common.SetResponseHeaders(w, meta.ETag)
 		w.Header().Set("x-ms-lease-id", leaseID)
 		w.WriteHeader(http.StatusCreated)
 
-	case "release", "break":
+	case "release":
+		// Clear the lease
+		meta.LeaseID = ""
+		meta.LeaseExpiry = time.Time{}
+		metadataBytes, _ := json.Marshal(meta)
+		h.db.Set(metaKey, metadataBytes, pebble.Sync)
+
 		common.SetResponseHeaders(w, meta.ETag)
 		w.WriteHeader(http.StatusOK)
 
-	case "renew", "change":
+	case "break":
+		// Clear the lease
+		meta.LeaseID = ""
+		meta.LeaseExpiry = time.Time{}
+		metadataBytes, _ := json.Marshal(meta)
+		h.db.Set(metaKey, metadataBytes, pebble.Sync)
+
+		common.SetResponseHeaders(w, meta.ETag)
+		w.WriteHeader(http.StatusOK)
+
+	case "renew":
+		leaseID := r.Header.Get("x-ms-lease-id")
+		if meta.LeaseID != leaseID {
+			h.writeError(w, http.StatusPreconditionFailed, "LeaseIdMismatchWithLeaseOperation", "The lease ID did not match")
+			return
+		}
+		meta.LeaseExpiry = time.Now().Add(60 * time.Second)
+		metadataBytes, _ := json.Marshal(meta)
+		h.db.Set(metaKey, metadataBytes, pebble.Sync)
+
+		common.SetResponseHeaders(w, meta.ETag)
+		w.Header().Set("x-ms-lease-id", leaseID)
+		w.WriteHeader(http.StatusOK)
+
+	case "change":
 		leaseID := r.Header.Get("x-ms-lease-id")
 		common.SetResponseHeaders(w, meta.ETag)
 		w.Header().Set("x-ms-lease-id", leaseID)
@@ -1013,13 +1164,14 @@ func (h *Handler) CopyBlob(w http.ResponseWriter, r *http.Request, container, bl
 	if len(sourceParts) < 3 {
 		sourceParts = strings.Split(strings.TrimPrefix(copySource, "https://"), "/")
 	}
-	if len(sourceParts) < 3 {
+	if len(sourceParts) < 4 {
 		h.writeError(w, http.StatusBadRequest, "InvalidHeaderValue", "Invalid copy source URL")
 		return
 	}
 	// Extract container and blob from source (skip host and account)
-	srcContainer := sourceParts[1]
-	srcBlob := strings.Join(sourceParts[2:], "/")
+	// sourceParts[0] = host:port, sourceParts[1] = account, sourceParts[2] = container, sourceParts[3:] = blob
+	srcContainer := sourceParts[2]
+	srcBlob := strings.Join(sourceParts[3:], "/")
 
 	// Read source blob
 	srcMetaKey := h.blobMetaKey(srcContainer, srcBlob)

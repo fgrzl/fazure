@@ -227,7 +227,7 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 	data, _ := json.Marshal(entity)
 	entity.ETag = common.GenerateETag(data)
 
-	// Marshal with ETag
+	// Marshal with ETag - use pointer to ensure custom MarshalJSON is called
 	data, err = json.Marshal(entity)
 	if err != nil {
 		return nil, err
@@ -252,10 +252,13 @@ func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*En
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
+	// Copy data before closing (Pebble reuses buffers)
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
 
 	var entity Entity
-	if err := json.Unmarshal(data, &entity); err != nil {
+	if err := json.Unmarshal(dataCopy, &entity); err != nil {
 		return nil, err
 	}
 
@@ -281,12 +284,15 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 		return nil, err
 	}
 
+	// Copy data before closing (Pebble reuses buffers)
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
 	var entity Entity
-	if err := json.Unmarshal(data, &entity); err != nil {
-		closer.Close()
+	if err := json.Unmarshal(dataCopy, &entity); err != nil {
 		return nil, err
 	}
-	closer.Close()
 
 	// Validate ETag if provided (and not wildcard)
 	if ifMatch != "" && ifMatch != "*" {
@@ -318,11 +324,11 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 
 	// Update timestamp and ETag
 	entity.Timestamp = time.Now().UTC()
-	data, _ = json.Marshal(entity)
+	data, _ = json.Marshal(&entity)
 	entity.ETag = common.GenerateETag(data)
 
-	// Marshal with new ETag
-	data, err = json.Marshal(entity)
+	// Marshal with new ETag - use pointer to ensure custom MarshalJSON is called
+	data, err = json.Marshal(&entity)
 	if err != nil {
 		return nil, err
 	}
@@ -349,12 +355,15 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		return nil, err
 	}
 
+	// Copy data before closing (Pebble reuses buffers)
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	closer.Close()
+
 	var entity Entity
-	if err := json.Unmarshal(data, &entity); err != nil {
-		closer.Close()
+	if err := json.Unmarshal(dataCopy, &entity); err != nil {
 		return nil, err
 	}
-	closer.Close()
 
 	// Update properties
 	if merge {
@@ -379,16 +388,16 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 
 	// Update timestamp and ETag
 	entity.Timestamp = time.Now().UTC()
-	data, _ = json.Marshal(entity)
-	entity.ETag = common.GenerateETag(data)
+	marshaledData, _ := json.Marshal(&entity)
+	entity.ETag = common.GenerateETag(marshaledData)
 
 	// Marshal with new ETag
-	data, err = json.Marshal(entity)
+	finalData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := db.Set(key, data, pebble.Sync); err != nil {
+	if err := db.Set(key, finalData, pebble.Sync); err != nil {
 		return nil, err
 	}
 

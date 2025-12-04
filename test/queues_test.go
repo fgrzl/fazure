@@ -304,12 +304,12 @@ func TestShouldSetQueueMetadataGivenExistingQueueWhenCallingSetMetadata(t *testi
 	})
 	require.NoError(t, err, "SetMetadata should succeed")
 
-	// Verify
+	// Verify - HTTP header names are canonicalized to Title-Case
 	props, err := qClient.GetProperties(ctx, nil)
 	require.NoError(t, err)
 	require.NotNil(t, props.Metadata, "Metadata should not be nil")
-	require.NotNil(t, props.Metadata["key1"], "key1 should exist in metadata")
-	assert.Equal(t, "value1", *props.Metadata["key1"])
+	require.NotNil(t, props.Metadata["Key1"], "Key1 should exist in metadata")
+	assert.Equal(t, "value1", *props.Metadata["Key1"])
 }
 
 func ptrQueueString(s string) *string { return &s }
