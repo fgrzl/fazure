@@ -288,7 +288,7 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 	json.NewEncoder(w).Encode(entity)
 }
 
-// UpdateEntity replaces an entity (PUT)
+// UpdateEntity replaces an entity (PUT) - also supports upsert
 func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName, pk, rk string) {
 	h.log.Info("updating entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
@@ -307,22 +307,46 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 	// Get If-Match header for ETag validation
 	ifMatch := r.Header.Get("If-Match")
 
-	entity, err := table.UpdateEntityWithETag(context.Background(), pk, rk, data, false, ifMatch)
-	if err != nil {
-		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+	var entity *Entity
+
+	// Check if entity exists
+	_, getErr := table.GetEntity(context.Background(), pk, rk)
+	if getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*") {
+		// Entity doesn't exist and no specific ETag required - upsert (insert)
+		entity, err = table.InsertEntity(context.Background(), pk, rk, data)
+		if err != nil {
+			h.log.Error("failed to insert entity for upsert", "table", tableName, "error", err)
+			h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 			return
 		}
-		if err == ErrPreconditionFailed {
-			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied", "The update condition specified in the request was not satisfied")
-			return
-		}
-		h.log.Error("failed to update entity", "table", tableName, "error", err)
-		h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
+		h.log.Info("entity upserted (inserted)", "table", tableName, "partitionKey", pk, "rowKey", rk)
+	} else if getErr == ErrEntityNotFound {
+		// Entity doesn't exist but specific ETag required - fail
+		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
 		return
+	} else if getErr != nil {
+		h.log.Error("failed to get entity", "table", tableName, "error", getErr)
+		h.writeError(w, http.StatusInternalServerError, "InternalServerError", getErr.Error())
+		return
+	} else {
+		// Entity exists - update it
+		entity, err = table.UpdateEntityWithETag(context.Background(), pk, rk, data, false, ifMatch)
+		if err != nil {
+			if err == ErrEntityNotFound {
+				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+				return
+			}
+			if err == ErrPreconditionFailed {
+				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied", "The update condition specified in the request was not satisfied")
+				return
+			}
+			h.log.Error("failed to update entity", "table", tableName, "error", err)
+			h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
+			return
+		}
+		h.log.Info("entity upserted (updated)", "table", tableName, "partitionKey", pk, "rowKey", rk)
 	}
 
-	h.log.Info("entity updated", "table", tableName, "partitionKey", pk, "rowKey", rk)
 	common.SetResponseHeaders(w, entity.ETag)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -571,6 +595,8 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 		pk := op.PartitionKey
 		rk := op.RowKey
 
+		h.log.Debug("validating batch operation", "index", i, "method", op.Method, "pk", pk, "rk", rk)
+
 		switch op.Method {
 		case http.MethodPost:
 			// Insert - check entity doesn't exist
@@ -580,17 +606,22 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 				return nil, i, ErrEntityExists
 			}
 		case http.MethodPut:
-			// Update - check entity exists
-			_, err := table.GetEntity(ctx, pk, rk)
-			if err == ErrEntityNotFound {
-				return nil, i, ErrEntityNotFound
-			}
+			// Update/Replace - in Azure, PUT requires entity to exist
+			// However, for compatibility with many clients that expect upsert,
+			// we treat PUT as upsert (insert or replace)
+			h.log.Debug("treating PUT as upsert for compatibility", "index", i, "method", op.Method)
+		case "PATCH", "MERGE":
+			// Merge/Upsert - entity may or may not exist, no validation needed
+			// Azure Tables upsert creates if not exists
+			h.log.Debug("skipping validation for upsert operation", "index", i, "method", op.Method)
 		case http.MethodDelete:
 			// Delete - check entity exists
 			_, err := table.GetEntity(ctx, pk, rk)
 			if err == ErrEntityNotFound {
 				return nil, i, ErrEntityNotFound
 			}
+		default:
+			h.log.Debug("unrecognized batch method", "index", i, "method", op.Method)
 		}
 	}
 
@@ -612,18 +643,42 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case http.MethodPut:
-			// Replace
-			_, err := table.UpdateEntity(ctx, pk, rk, props, false)
-			if err != nil {
+			// Replace/Upsert - for compatibility, insert if not exists, replace if exists
+			_, err := table.GetEntity(ctx, pk, rk)
+			if err == ErrEntityNotFound {
+				// Entity doesn't exist - insert it
+				_, err = table.InsertEntity(ctx, pk, rk, props)
+				if err != nil {
+					return nil, i, err
+				}
+			} else if err != nil {
 				return nil, i, err
+			} else {
+				// Entity exists - replace it
+				_, err = table.UpdateEntity(ctx, pk, rk, props, false)
+				if err != nil {
+					return nil, i, err
+				}
 			}
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case "PATCH", "MERGE":
-			// Merge
-			_, err := table.UpdateEntity(ctx, pk, rk, props, true)
-			if err != nil {
+			// Merge/Upsert - insert if not exists, merge if exists
+			_, err := table.GetEntity(ctx, pk, rk)
+			if err == ErrEntityNotFound {
+				// Entity doesn't exist - insert it
+				_, err = table.InsertEntity(ctx, pk, rk, props)
+				if err != nil {
+					return nil, i, err
+				}
+			} else if err != nil {
 				return nil, i, err
+			} else {
+				// Entity exists - merge it
+				_, err = table.UpdateEntity(ctx, pk, rk, props, true)
+				if err != nil {
+					return nil, i, err
+				}
 			}
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
