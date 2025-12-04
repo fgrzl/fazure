@@ -1,12 +1,16 @@
 package blobs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,15 +20,23 @@ import (
 
 // Handler handles blob storage operations
 type Handler struct {
-	db  *pebble.DB
-	log *slog.Logger
+	db      *pebble.DB
+	dataDir string // Directory for blob file storage
+	log     *slog.Logger
 }
 
 // NewHandler creates a new blob handler
-func NewHandler(db *pebble.DB, logger *slog.Logger) *Handler {
+func NewHandler(db *pebble.DB, dataDir string, logger *slog.Logger) *Handler {
+	// Create blobs subdirectory
+	blobDir := filepath.Join(dataDir, "blobs")
+	if err := os.MkdirAll(blobDir, 0755); err != nil {
+		logger.Error("failed to create blob data directory", "error", err)
+	}
+
 	return &Handler{
-		db:  db,
-		log: logger.With("component", "blobs"),
+		db:      db,
+		dataDir: blobDir,
+		log:     logger.With("component", "blobs"),
 	}
 }
 
@@ -118,14 +130,34 @@ func (h *Handler) containerKey(container string) []byte {
 	return []byte(fmt.Sprintf("blobs/containers/%s", container))
 }
 
-// blobKey returns the Pebble key for a blob
-func (h *Handler) blobKey(container, blob string) []byte {
-	return []byte(fmt.Sprintf("blobs/data/%s/%s", container, blob))
-}
-
-// blobMetaKey returns the Pebble key for blob metadata
+// blobMetaKey returns the Pebble key for blob metadata (index entry)
 func (h *Handler) blobMetaKey(container, blob string) []byte {
 	return []byte(fmt.Sprintf("blobs/meta/%s/%s", container, blob))
+}
+
+// blobFilePath returns the filesystem path for blob data
+// Uses content-addressable storage with hash-based directories
+func (h *Handler) blobFilePath(container, blob string) string {
+	// Create a hash of container/blob to distribute files
+	hash := sha256.Sum256([]byte(container + "/" + blob))
+	hashStr := hex.EncodeToString(hash[:])
+
+	// Use first 4 chars as subdirectory for distribution
+	subdir := hashStr[:4]
+	return filepath.Join(h.dataDir, subdir, hashStr)
+}
+
+// BlobMetadata stores blob metadata in Pebble
+type BlobMetadata struct {
+	Container     string            `json:"container"`
+	Blob          string            `json:"blob"`
+	ContentType   string            `json:"contentType"`
+	ContentLength int64             `json:"contentLength"`
+	ETag          string            `json:"etag"`
+	Created       time.Time         `json:"created"`
+	Modified      time.Time         `json:"modified"`
+	FilePath      string            `json:"filePath"` // Path to actual blob data
+	UserMetadata  map[string]string `json:"userMetadata,omitempty"`
 }
 
 // CreateContainer creates a new blob container
@@ -181,12 +213,8 @@ func (h *Handler) DeleteContainer(w http.ResponseWriter, r *http.Request, contai
 	}
 	closer.Close()
 
-	// Delete container and all blobs
-	batch := h.db.NewBatch()
-	batch.Delete(key, nil)
-
-	// Delete all blobs in container
-	prefix := []byte(fmt.Sprintf("blobs/data/%s/", container))
+	// Find and delete all blobs in container (both metadata and files)
+	prefix := []byte(fmt.Sprintf("blobs/meta/%s/", container))
 	iter, err := h.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: append(prefix, 0xff),
@@ -196,11 +224,22 @@ func (h *Handler) DeleteContainer(w http.ResponseWriter, r *http.Request, contai
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+
+	batch := h.db.NewBatch()
+	batch.Delete(key, nil)
 
 	for iter.First(); iter.Valid(); iter.Next() {
+		// Parse metadata to get file path
+		var meta BlobMetadata
+		if err := json.Unmarshal(iter.Value(), &meta); err == nil {
+			// Delete the blob file
+			if meta.FilePath != "" {
+				os.Remove(meta.FilePath)
+			}
+		}
 		batch.Delete(iter.Key(), nil)
 	}
+	iter.Close()
 
 	if err := batch.Commit(pebble.Sync); err != nil {
 		h.log.Error("failed to delete container", "container", container, "error", err)

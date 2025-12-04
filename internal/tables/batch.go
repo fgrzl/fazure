@@ -3,6 +3,7 @@ package tables
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -13,6 +14,7 @@ import (
 // BatchRequest represents a batch request
 type BatchRequest struct {
 	Operations []BatchOperation
+	TableName  string
 }
 
 // BatchOperation represents a single operation in a batch
@@ -23,6 +25,7 @@ type BatchOperation struct {
 	Body         []byte
 	PartitionKey string
 	RowKey       string
+	EntityData   map[string]interface{}
 }
 
 // BatchResponse represents a batch response
@@ -116,11 +119,42 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 				body, _ := io.ReadAll(httpReq.Body)
 				httpReq.Body.Close()
 
+				// Parse body to extract PartitionKey and RowKey
+				var entityData map[string]interface{}
+				var pk, rk string
+				if len(body) > 0 {
+					if err := json.Unmarshal(body, &entityData); err == nil {
+						if p, ok := entityData["PartitionKey"].(string); ok {
+							pk = p
+						}
+						if r, ok := entityData["RowKey"].(string); ok {
+							rk = r
+						}
+					}
+				}
+
+				// Extract table name from URL path
+				// URL looks like: /devstoreaccount1/tablename
+				urlPath := strings.Trim(httpReq.URL.Path, "/")
+				urlParts := strings.Split(urlPath, "/")
+				var tableName string
+				if len(urlParts) >= 2 {
+					tableName = urlParts[1]
+				}
+
+				// Set table name on the batch request if not already set
+				if batchReq.TableName == "" && tableName != "" {
+					batchReq.TableName = tableName
+				}
+
 				op := BatchOperation{
-					Method:  httpReq.Method,
-					URL:     httpReq.URL.String(),
-					Headers: httpReq.Header,
-					Body:    body,
+					Method:       httpReq.Method,
+					URL:          httpReq.URL.String(),
+					Headers:      httpReq.Header,
+					Body:         body,
+					PartitionKey: pk,
+					RowKey:       rk,
+					EntityData:   entityData,
 				}
 				batchReq.Operations = append(batchReq.Operations, op)
 

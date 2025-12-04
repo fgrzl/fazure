@@ -448,6 +448,21 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Debug("batch request parsed", "operations", len(batchReq.Operations))
 
+	// Validate that all operations target the same partition
+	if err := ValidateBatchRequest(batchReq); err != nil {
+		h.log.Error("batch validation failed", "error", err)
+		h.writeBatchError(w, http.StatusBadRequest, "CommandsInBatchActOnDifferentPartitions", err.Error())
+		return
+	}
+
+	// Execute the batch operations atomically
+	responses, failedIndex, err := h.executeBatch(batchReq)
+	if err != nil {
+		h.log.Error("batch execution failed", "error", err, "failedIndex", failedIndex)
+		h.writeBatchErrorWithIndex(w, failedIndex, err)
+		return
+	}
+
 	// Generate boundaries matching Azure format exactly
 	batchBoundary := fmt.Sprintf("batchresponse_%s", generateUUID())
 	changesetBoundary := fmt.Sprintf("changesetresponse_%s", generateUUID())
@@ -457,8 +472,8 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 	changesetWriter := multipart.NewWriter(changesetBuf)
 	changesetWriter.SetBoundary(changesetBoundary)
 
-	for i, op := range batchReq.Operations {
-		h.log.Debug("executing batch operation", "method", op.Method, "url", op.URL)
+	for i, resp := range responses {
+		h.log.Debug("writing batch response", "index", i, "status", resp.StatusCode)
 
 		// Create headers for this part
 		partHeaders := make(textproto.MIMEHeader)
@@ -473,7 +488,7 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 
 		// Write the HTTP response for this operation
 		var httpResp strings.Builder
-		httpResp.WriteString("HTTP/1.1 204 No Content\r\n")
+		httpResp.WriteString(fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode)))
 		httpResp.WriteString(fmt.Sprintf("Content-ID: %d\r\n", i+1))
 		httpResp.WriteString("X-Content-Type-Options: nosniff\r\n")
 		httpResp.WriteString("Cache-Control: no-cache\r\n")
@@ -515,4 +530,154 @@ func generateUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// executeBatch executes batch operations atomically
+// Returns the responses, the index of the failed operation (if any), and an error
+func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse, int, error) {
+	ctx := context.Background()
+	responses := make([]BatchOperationResponse, len(batchReq.Operations))
+
+	// Get the table
+	table, err := h.store.GetTable(ctx, batchReq.TableName)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// First pass: validate all operations will succeed
+	for i, op := range batchReq.Operations {
+		pk := op.PartitionKey
+		rk := op.RowKey
+
+		switch op.Method {
+		case http.MethodPost:
+			// Insert - check entity doesn't exist
+			_, err := table.GetEntity(ctx, pk, rk)
+			if err == nil {
+				// Entity already exists - conflict
+				return nil, i, ErrEntityExists
+			}
+		case http.MethodPut:
+			// Update - check entity exists
+			_, err := table.GetEntity(ctx, pk, rk)
+			if err == ErrEntityNotFound {
+				return nil, i, ErrEntityNotFound
+			}
+		case http.MethodDelete:
+			// Delete - check entity exists
+			_, err := table.GetEntity(ctx, pk, rk)
+			if err == ErrEntityNotFound {
+				return nil, i, ErrEntityNotFound
+			}
+		}
+	}
+
+	// Second pass: execute all operations
+	for i, op := range batchReq.Operations {
+		pk := op.PartitionKey
+		rk := op.RowKey
+		props := op.EntityData
+
+		h.log.Debug("executing batch operation", "index", i, "method", op.Method, "pk", pk, "rk", rk)
+
+		switch op.Method {
+		case http.MethodPost:
+			// Insert
+			_, err := table.InsertEntity(ctx, pk, rk, props)
+			if err != nil {
+				return nil, i, err
+			}
+			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
+
+		case http.MethodPut:
+			// Replace
+			_, err := table.UpdateEntity(ctx, pk, rk, props, false)
+			if err != nil {
+				return nil, i, err
+			}
+			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
+
+		case "PATCH", "MERGE":
+			// Merge
+			_, err := table.UpdateEntity(ctx, pk, rk, props, true)
+			if err != nil {
+				return nil, i, err
+			}
+			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
+
+		case http.MethodDelete:
+			// Delete
+			err := table.DeleteEntity(ctx, pk, rk)
+			if err != nil {
+				return nil, i, err
+			}
+			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
+
+		default:
+			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
+		}
+	}
+
+	return responses, -1, nil
+}
+
+// writeBatchError writes a batch error response
+func (h *Handler) writeBatchError(w http.ResponseWriter, statusCode int, code, message string) {
+	batchBoundary := fmt.Sprintf("batchresponse_%s", generateUUID())
+	changesetBoundary := fmt.Sprintf("changesetresponse_%s", generateUUID())
+
+	// Build error response in changeset
+	changesetBuf := new(bytes.Buffer)
+	changesetWriter := multipart.NewWriter(changesetBuf)
+	changesetWriter.SetBoundary(changesetBoundary)
+
+	partHeaders := make(textproto.MIMEHeader)
+	partHeaders.Set("Content-Type", "application/http")
+	partHeaders.Set("Content-Transfer-Encoding", "binary")
+
+	partWriter, _ := changesetWriter.CreatePart(partHeaders)
+
+	errorBody := fmt.Sprintf(`{"odata.error":{"code":"%s","message":{"lang":"en-US","value":"%s"}}}`, code, message)
+
+	var httpResp strings.Builder
+	httpResp.WriteString(fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode)))
+	httpResp.WriteString("Content-Type: application/json;odata=minimalmetadata\r\n")
+	httpResp.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(errorBody)))
+	httpResp.WriteString("\r\n")
+	httpResp.WriteString(errorBody)
+
+	partWriter.Write([]byte(httpResp.String()))
+	changesetWriter.Close()
+
+	// Build outer batch response
+	batchBuf := new(bytes.Buffer)
+	batchWriter := multipart.NewWriter(batchBuf)
+	batchWriter.SetBoundary(batchBoundary)
+
+	batchPartHeaders := make(textproto.MIMEHeader)
+	batchPartHeaders.Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", changesetBoundary))
+
+	batchPart, _ := batchWriter.CreatePart(batchPartHeaders)
+	batchPart.Write(changesetBuf.Bytes())
+	batchWriter.Close()
+
+	w.Header().Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", batchBoundary))
+	w.WriteHeader(http.StatusAccepted)
+	w.Write(batchBuf.Bytes())
+}
+
+// writeBatchErrorWithIndex writes a batch error response for a specific operation
+func (h *Handler) writeBatchErrorWithIndex(w http.ResponseWriter, index int, err error) {
+	code := "InvalidInput"
+	statusCode := http.StatusBadRequest
+
+	if err == ErrEntityExists {
+		code = "EntityAlreadyExists"
+		statusCode = http.StatusConflict
+	} else if err == ErrEntityNotFound {
+		code = "ResourceNotFound"
+		statusCode = http.StatusNotFound
+	}
+
+	h.writeBatchError(w, statusCode, code, fmt.Sprintf("Operation %d failed: %s", index, err.Error()))
 }
