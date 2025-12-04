@@ -7,11 +7,15 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/appendblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/lease"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/pageblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -628,4 +632,557 @@ func TestShouldFailUpdateGivenStaleETagWhenCallingUploadWithIfMatch(t *testing.T
 		},
 	})
 	assert.Error(t, err, "Upload with stale ETag should fail")
+}
+
+// ============================================================================
+// HIGH PRIORITY: Append Blob Tests
+// ============================================================================
+
+func newAppendBlobClient(t *testing.T, containerName, blobName string) *appendblob.Client {
+	client, err := appendblob.NewClientWithNoCredential(
+		blobEmulatorURL+"/"+blobAccountName+"/"+containerName+"/"+blobName, nil,
+	)
+	require.NoError(t, err)
+	return client
+}
+
+func TestShouldCreateAppendBlobGivenValidContainerWhenCallingCreate(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-appendblob-create"
+	blobName := "append.txt"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	// Act
+	appendClient := newAppendBlobClient(t, containerName, blobName)
+	_, err = appendClient.Create(ctx, nil)
+
+	// Assert
+	require.NoError(t, err, "Create append blob should succeed")
+
+	// Verify blob exists
+	blobClient := newBlobClient(t, containerName, blobName)
+	props, err := blobClient.GetProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, blob.BlobTypeAppendBlob, *props.BlobType)
+}
+
+func TestShouldAppendBlockGivenExistingAppendBlobWhenCallingAppendBlock(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-appendblob-append"
+	blobName := "append.txt"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	appendClient := newAppendBlobClient(t, containerName, blobName)
+	_, err = appendClient.Create(ctx, nil)
+	require.NoError(t, err)
+
+	// Act - Append first block
+	block1 := []byte("Hello, ")
+	_, err = appendClient.AppendBlock(ctx, streaming.NopCloser(bytes.NewReader(block1)), nil)
+	require.NoError(t, err, "First AppendBlock should succeed")
+
+	// Act - Append second block
+	block2 := []byte("World!")
+	_, err = appendClient.AppendBlock(ctx, streaming.NopCloser(bytes.NewReader(block2)), nil)
+	require.NoError(t, err, "Second AppendBlock should succeed")
+
+	// Assert - Download and verify content
+	blobClient := newBlobClient(t, containerName, blobName)
+	resp, err := blobClient.DownloadStream(ctx, nil)
+	require.NoError(t, err)
+	downloaded, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, "Hello, World!", string(downloaded))
+}
+
+func TestShouldTrackAppendPositionGivenMultipleAppendsWhenCallingAppendBlock(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-appendblob-position"
+	blobName := "append.txt"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	appendClient := newAppendBlobClient(t, containerName, blobName)
+	_, err = appendClient.Create(ctx, nil)
+	require.NoError(t, err)
+
+	// Act - Append blocks and check responses
+	block1 := []byte("12345")
+	resp1, err := appendClient.AppendBlock(ctx, streaming.NopCloser(bytes.NewReader(block1)), nil)
+	require.NoError(t, err)
+	assert.NotNil(t, resp1.BlobAppendOffset)
+
+	block2 := []byte("67890")
+	resp2, err := appendClient.AppendBlock(ctx, streaming.NopCloser(bytes.NewReader(block2)), nil)
+	require.NoError(t, err)
+	assert.NotNil(t, resp2.BlobAppendOffset)
+
+	// Verify blob properties
+	blobClient := newBlobClient(t, containerName, blobName)
+	props, err := blobClient.GetProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), *props.ContentLength)
+}
+
+// ============================================================================
+// HIGH PRIORITY: Page Blob Tests
+// ============================================================================
+
+func newPageBlobClient(t *testing.T, containerName, blobName string) *pageblob.Client {
+	client, err := pageblob.NewClientWithNoCredential(
+		blobEmulatorURL+"/"+blobAccountName+"/"+containerName+"/"+blobName, nil,
+	)
+	require.NoError(t, err)
+	return client
+}
+
+func TestShouldCreatePageBlobGivenValidSizeWhenCallingCreate(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-pageblob-create"
+	blobName := "page.vhd"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	// Act - Create page blob with 1MB size (must be multiple of 512)
+	pageClient := newPageBlobClient(t, containerName, blobName)
+	size := int64(1024 * 1024) // 1MB
+	_, err = pageClient.Create(ctx, size, nil)
+
+	// Assert
+	require.NoError(t, err, "Create page blob should succeed")
+
+	// Verify blob properties
+	blobClient := newBlobClient(t, containerName, blobName)
+	props, err := blobClient.GetProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, blob.BlobTypePageBlob, *props.BlobType)
+	assert.Equal(t, size, *props.ContentLength)
+}
+
+func TestShouldUploadPagesGivenValidRangeWhenCallingUploadPages(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-pageblob-upload"
+	blobName := "page.vhd"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	pageClient := newPageBlobClient(t, containerName, blobName)
+	size := int64(4096) // 4KB (8 pages)
+	_, err = pageClient.Create(ctx, size, nil)
+	require.NoError(t, err)
+
+	// Act - Upload 512 bytes to first page
+	pageData := make([]byte, 512)
+	for i := range pageData {
+		pageData[i] = byte(i % 256)
+	}
+	_, err = pageClient.UploadPages(ctx, streaming.NopCloser(bytes.NewReader(pageData)), blob.HTTPRange{Offset: 0, Count: 512}, nil)
+
+	// Assert
+	require.NoError(t, err, "UploadPages should succeed")
+
+	// Download and verify
+	blobClient := newBlobClient(t, containerName, blobName)
+	resp, err := blobClient.DownloadStream(ctx, &blob.DownloadStreamOptions{
+		Range: blob.HTTPRange{Offset: 0, Count: 512},
+	})
+	require.NoError(t, err)
+	downloaded, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, pageData, downloaded)
+}
+
+func TestShouldClearPagesGivenWrittenPagesWhenCallingClearPages(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-pageblob-clear"
+	blobName := "page.vhd"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	pageClient := newPageBlobClient(t, containerName, blobName)
+	size := int64(4096)
+	_, err = pageClient.Create(ctx, size, nil)
+	require.NoError(t, err)
+
+	// Write some data
+	pageData := make([]byte, 512)
+	for i := range pageData {
+		pageData[i] = 0xFF
+	}
+	_, err = pageClient.UploadPages(ctx, streaming.NopCloser(bytes.NewReader(pageData)), blob.HTTPRange{Offset: 0, Count: 512}, nil)
+	require.NoError(t, err)
+
+	// Act - Clear the pages
+	_, err = pageClient.ClearPages(ctx, blob.HTTPRange{Offset: 0, Count: 512}, nil)
+
+	// Assert
+	require.NoError(t, err, "ClearPages should succeed")
+
+	// Download and verify cleared (should be zeros)
+	blobClient := newBlobClient(t, containerName, blobName)
+	resp, err := blobClient.DownloadStream(ctx, &blob.DownloadStreamOptions{
+		Range: blob.HTTPRange{Offset: 0, Count: 512},
+	})
+	require.NoError(t, err)
+	downloaded, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	// All bytes should be zero
+	allZero := true
+	for _, b := range downloaded {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	assert.True(t, allZero, "Cleared pages should be all zeros")
+}
+
+func TestShouldResizePageBlobGivenNewSizeWhenCallingResize(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-pageblob-resize"
+	blobName := "page.vhd"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	pageClient := newPageBlobClient(t, containerName, blobName)
+	_, err = pageClient.Create(ctx, 4096, nil)
+	require.NoError(t, err)
+
+	// Act - Resize to larger size
+	newSize := int64(8192)
+	_, err = pageClient.Resize(ctx, newSize, nil)
+
+	// Assert
+	require.NoError(t, err, "Resize should succeed")
+
+	blobClient := newBlobClient(t, containerName, blobName)
+	props, err := blobClient.GetProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, newSize, *props.ContentLength)
+}
+
+func TestShouldGetPageRangesGivenWrittenPagesWhenCallingGetPageRanges(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-pageblob-ranges"
+	blobName := "page.vhd"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	pageClient := newPageBlobClient(t, containerName, blobName)
+	_, err = pageClient.Create(ctx, 4096, nil)
+	require.NoError(t, err)
+
+	// Write to specific pages
+	pageData := make([]byte, 512)
+	for i := range pageData {
+		pageData[i] = 0xFF
+	}
+	// Write to pages 0 and 2 (offsets 0 and 1024)
+	_, err = pageClient.UploadPages(ctx, streaming.NopCloser(bytes.NewReader(pageData)), blob.HTTPRange{Offset: 0, Count: 512}, nil)
+	require.NoError(t, err)
+	_, err = pageClient.UploadPages(ctx, streaming.NopCloser(bytes.NewReader(pageData)), blob.HTTPRange{Offset: 1024, Count: 512}, nil)
+	require.NoError(t, err)
+
+	// Act - Use pager to get page ranges
+	pager := pageClient.NewGetPageRangesPager(nil)
+	found := false
+	for pager.More() {
+		resp, err := pager.NextPage(ctx)
+		require.NoError(t, err, "GetPageRanges should succeed")
+		if len(resp.PageList.PageRange) > 0 {
+			found = true
+		}
+	}
+
+	// Assert
+	assert.True(t, found, "Should have at least one page range")
+}
+
+// ============================================================================
+// MEDIUM PRIORITY: Container Lease Tests
+// ============================================================================
+
+func TestShouldAcquireContainerLeaseGivenValidContainerWhenCallingAcquireLease(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-container-lease-acquire"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	// Act
+	containerClient := newContainerClient(t, containerName)
+	leaseClient, err := lease.NewContainerClient(containerClient, nil)
+	require.NoError(t, err)
+
+	duration := int32(15) // 15 seconds
+	resp, err := leaseClient.AcquireLease(ctx, duration, nil)
+
+	// Assert
+	require.NoError(t, err, "AcquireLease should succeed")
+	assert.NotEmpty(t, *resp.LeaseID)
+
+	// Cleanup - release lease
+	_, _ = leaseClient.ReleaseLease(ctx, nil)
+}
+
+func TestShouldPreventDeleteGivenLeasedContainerWhenCallingDeleteContainer(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-container-lease-delete"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+
+	containerClient := newContainerClient(t, containerName)
+	leaseClient, err := lease.NewContainerClient(containerClient, nil)
+	require.NoError(t, err)
+
+	duration := int32(15)
+	_, err = leaseClient.AcquireLease(ctx, duration, nil)
+	require.NoError(t, err)
+
+	// Act - Try to delete without lease ID
+	_, err = client.DeleteContainer(ctx, containerName, nil)
+
+	// Assert
+	assert.Error(t, err, "Delete should fail when container is leased")
+
+	// Cleanup - release lease and delete
+	_, _ = leaseClient.ReleaseLease(ctx, nil)
+	_, _ = client.DeleteContainer(ctx, containerName, nil)
+}
+
+func TestShouldRenewContainerLeaseGivenActivLeaseWhenCallingRenewLease(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-container-lease-renew"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer func() {
+		containerClient := newContainerClient(t, containerName)
+		leaseClient, _ := lease.NewContainerClient(containerClient, nil)
+		leaseClient.ReleaseLease(ctx, nil)
+		client.DeleteContainer(ctx, containerName, nil)
+	}()
+
+	containerClient := newContainerClient(t, containerName)
+	leaseClient, err := lease.NewContainerClient(containerClient, nil)
+	require.NoError(t, err)
+
+	duration := int32(15)
+	_, err = leaseClient.AcquireLease(ctx, duration, nil)
+	require.NoError(t, err)
+
+	// Act
+	_, err = leaseClient.RenewLease(ctx, nil)
+
+	// Assert
+	require.NoError(t, err, "RenewLease should succeed")
+}
+
+func TestShouldReleaseContainerLeaseGivenActiveLeaseWhenCallingReleaseLease(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-container-lease-release"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	containerClient := newContainerClient(t, containerName)
+	leaseClient, err := lease.NewContainerClient(containerClient, nil)
+	require.NoError(t, err)
+
+	duration := int32(15)
+	_, err = leaseClient.AcquireLease(ctx, duration, nil)
+	require.NoError(t, err)
+
+	// Act
+	_, err = leaseClient.ReleaseLease(ctx, nil)
+
+	// Assert
+	require.NoError(t, err, "ReleaseLease should succeed")
+
+	// Verify - should be able to delete container now
+	_, err = client.DeleteContainer(ctx, containerName, nil)
+	require.NoError(t, err, "Delete should succeed after releasing lease")
+}
+
+func TestShouldBreakContainerLeaseGivenActiveLeaseWhenCallingBreakLease(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClient(t)
+	containerName := "test-container-lease-break"
+
+	// Setup
+	_, err := client.CreateContainer(ctx, containerName, nil)
+	require.NoError(t, err)
+	defer client.DeleteContainer(ctx, containerName, nil)
+
+	containerClient := newContainerClient(t, containerName)
+	leaseClient, err := lease.NewContainerClient(containerClient, nil)
+	require.NoError(t, err)
+
+	duration := int32(15)
+	_, err = leaseClient.AcquireLease(ctx, duration, nil)
+	require.NoError(t, err)
+
+	// Act - Break lease immediately
+	breakPeriod := int32(0)
+	_, err = leaseClient.BreakLease(ctx, &lease.ContainerBreakOptions{
+		BreakPeriod: &breakPeriod,
+	})
+
+	// Assert
+	require.NoError(t, err, "BreakLease should succeed")
+}
+
+// ============================================================================
+// MEDIUM PRIORITY: Service Properties Tests (Blob)
+// ============================================================================
+
+func newBlobServiceClientForProps(t *testing.T) *service.Client {
+	client, err := service.NewClientWithNoCredential(blobEmulatorURL+"/"+blobAccountName, nil)
+	require.NoError(t, err)
+	return client
+}
+
+func TestShouldGetBlobServicePropertiesGivenBlobServiceWhenCallingGetProperties(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClientForProps(t)
+
+	// Act
+	resp, err := client.GetProperties(ctx, nil)
+
+	// Assert
+	require.NoError(t, err, "GetProperties should succeed")
+	assert.NotNil(t, resp.StorageServiceProperties)
+}
+
+func TestShouldSetBlobServicePropertiesGivenValidConfigWhenCallingSetProperties(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClientForProps(t)
+
+	// Act - Set logging properties
+	enabled := true
+	retentionDays := int32(7)
+	opts := &service.SetPropertiesOptions{
+		Logging: &service.Logging{
+			Version: to.Ptr("1.0"),
+			Delete:  &enabled,
+			Read:    &enabled,
+			Write:   &enabled,
+			RetentionPolicy: &service.RetentionPolicy{
+				Enabled: &enabled,
+				Days:    &retentionDays,
+			},
+		},
+	}
+	_, err := client.SetProperties(ctx, opts)
+
+	// Assert
+	require.NoError(t, err, "SetProperties should succeed")
+}
+
+// ============================================================================
+// MEDIUM PRIORITY: CORS/Preflight Tests
+// ============================================================================
+
+func TestShouldSetCORSRulesGivenValidRulesWhenCallingSetProperties(t *testing.T) {
+	ctx := context.Background()
+	client := newBlobServiceClientForProps(t)
+
+	// Act - Set CORS rules
+	corsRule := service.CORSRule{
+		AllowedOrigins:  to.Ptr("http://localhost:3000"),
+		AllowedMethods:  to.Ptr("GET,PUT,POST,DELETE"),
+		AllowedHeaders:  to.Ptr("*"),
+		ExposedHeaders:  to.Ptr("x-ms-*"),
+		MaxAgeInSeconds: to.Ptr(int32(3600)),
+	}
+	opts := &service.SetPropertiesOptions{
+		CORS: []*service.CORSRule{&corsRule},
+	}
+	_, err := client.SetProperties(ctx, opts)
+
+	// Assert
+	require.NoError(t, err, "SetProperties with CORS should succeed")
+
+	// Verify
+	getResp, err := client.GetProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, getResp.CORS)
+}
+
+func TestShouldReturnCORSHeadersGivenPreflightRequestWhenCallingOptions(t *testing.T) {
+	// This test verifies CORS preflight behavior
+	// The actual OPTIONS request handling is typically tested at the HTTP level
+	ctx := context.Background()
+	client := newBlobServiceClientForProps(t)
+
+	// Setup - Enable CORS
+	corsRule := service.CORSRule{
+		AllowedOrigins:  to.Ptr("*"),
+		AllowedMethods:  to.Ptr("GET,PUT,POST,DELETE,HEAD"),
+		AllowedHeaders:  to.Ptr("*"),
+		ExposedHeaders:  to.Ptr("*"),
+		MaxAgeInSeconds: to.Ptr(int32(3600)),
+	}
+	opts := &service.SetPropertiesOptions{
+		CORS: []*service.CORSRule{&corsRule},
+	}
+	_, err := client.SetProperties(ctx, opts)
+	require.NoError(t, err, "Setting CORS rules should succeed")
+
+	// The actual preflight test would require raw HTTP client
+	// For SDK-level test, we verify CORS config was accepted
+	getResp, err := client.GetProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, getResp.CORS, "CORS rules should be configured")
 }

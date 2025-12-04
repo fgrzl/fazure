@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -470,4 +471,71 @@ func TestShouldIncrementDequeueCountGivenMultipleDequeuedWhenCallingDequeue(t *t
 	require.NoError(t, err)
 	require.Len(t, resp2.Messages, 1)
 	assert.Equal(t, int64(2), *resp2.Messages[0].DequeueCount, "Dequeue count should increment")
+}
+
+// ============================================================================
+// MEDIUM PRIORITY: Queue Service Properties Tests
+// ============================================================================
+
+func TestShouldGetQueueServicePropertiesGivenQueueServiceWhenCallingGetServiceProperties(t *testing.T) {
+	ctx := context.Background()
+	client := newQueueServiceClient(t)
+
+	// Act
+	resp, err := client.GetServiceProperties(ctx, nil)
+
+	// Assert
+	require.NoError(t, err, "GetServiceProperties should succeed")
+	assert.NotNil(t, resp.StorageServiceProperties)
+}
+
+func TestShouldSetQueueServicePropertiesGivenValidConfigWhenCallingSetProperties(t *testing.T) {
+	ctx := context.Background()
+	client := newQueueServiceClient(t)
+
+	// Act - Set logging properties
+	enabled := true
+	retentionDays := int32(7)
+	opts := &azqueue.SetPropertiesOptions{
+		Logging: &azqueue.Logging{
+			Version: to.Ptr("1.0"),
+			Delete:  &enabled,
+			Read:    &enabled,
+			Write:   &enabled,
+			RetentionPolicy: &azqueue.RetentionPolicy{
+				Enabled: &enabled,
+				Days:    &retentionDays,
+			},
+		},
+	}
+	_, err := client.SetProperties(ctx, opts)
+
+	// Assert
+	require.NoError(t, err, "SetProperties should succeed")
+}
+
+func TestShouldSetQueueCORSRulesGivenValidRulesWhenCallingSetProperties(t *testing.T) {
+	ctx := context.Background()
+	client := newQueueServiceClient(t)
+
+	// Act - Set CORS rules
+	corsRule := azqueue.CORSRule{
+		AllowedOrigins:  to.Ptr("http://localhost:3000"),
+		AllowedMethods:  to.Ptr("GET,PUT,POST,DELETE"),
+		AllowedHeaders:  to.Ptr("*"),
+		ExposedHeaders:  to.Ptr("x-ms-*"),
+		MaxAgeInSeconds: to.Ptr(int32(3600)),
+	}
+	opts := &azqueue.SetPropertiesOptions{
+		CORS: []*azqueue.CORSRule{&corsRule},
+	}
+	_, err := client.SetProperties(ctx, opts)
+
+	// Assert
+	require.NoError(t, err, "SetProperties with CORS should succeed")
+
+	// Verify
+	getResp, err := client.GetServiceProperties(ctx, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, getResp.CORS)
 }
