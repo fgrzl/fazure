@@ -81,6 +81,19 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Service-level operations: /{account}?restype=service&comp=properties
+	if len(parts) == 1 && query.Get("restype") == "service" && query.Get("comp") == "properties" {
+		switch r.Method {
+		case http.MethodGet:
+			h.GetServiceProperties(w, r)
+		case http.MethodPut:
+			h.SetServiceProperties(w, r)
+		default:
+			h.writeError(w, http.StatusMethodNotAllowed, "UnsupportedHttpVerb", "Method not allowed")
+		}
+		return
+	}
+
 	// List queues: /{account}?comp=list
 	if len(parts) == 1 && query.Get("comp") == "list" && r.Method == http.MethodGet {
 		h.ListQueues(w, r)
@@ -825,4 +838,186 @@ func (h *Handler) SetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 	h.log.Info("queue metadata set", "queue", queue)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============================================================================
+// Service Properties
+// ============================================================================
+
+// ServiceProperties stores queue service properties
+type ServiceProperties struct {
+	Logging       *Logging   `xml:"Logging" json:"logging,omitempty"`
+	HourMetrics   *Metrics   `xml:"HourMetrics" json:"hourMetrics,omitempty"`
+	MinuteMetrics *Metrics   `xml:"MinuteMetrics" json:"minuteMetrics,omitempty"`
+	CORS          []CORSRule `xml:"Cors>CorsRule" json:"cors,omitempty"`
+}
+
+type Logging struct {
+	Version         string           `xml:"Version" json:"version"`
+	Delete          bool             `xml:"Delete" json:"delete"`
+	Read            bool             `xml:"Read" json:"read"`
+	Write           bool             `xml:"Write" json:"write"`
+	RetentionPolicy *RetentionPolicy `xml:"RetentionPolicy" json:"retentionPolicy,omitempty"`
+}
+
+type Metrics struct {
+	Version         string           `xml:"Version" json:"version"`
+	Enabled         bool             `xml:"Enabled" json:"enabled"`
+	IncludeAPIs     *bool            `xml:"IncludeAPIs,omitempty" json:"includeAPIs,omitempty"`
+	RetentionPolicy *RetentionPolicy `xml:"RetentionPolicy" json:"retentionPolicy,omitempty"`
+}
+
+type RetentionPolicy struct {
+	Enabled bool  `xml:"Enabled" json:"enabled"`
+	Days    int32 `xml:"Days,omitempty" json:"days,omitempty"`
+}
+
+type CORSRule struct {
+	AllowedOrigins  string `xml:"AllowedOrigins" json:"allowedOrigins"`
+	AllowedMethods  string `xml:"AllowedMethods" json:"allowedMethods"`
+	AllowedHeaders  string `xml:"AllowedHeaders" json:"allowedHeaders"`
+	ExposedHeaders  string `xml:"ExposedHeaders" json:"exposedHeaders"`
+	MaxAgeInSeconds int32  `xml:"MaxAgeInSeconds" json:"maxAgeInSeconds"`
+}
+
+// servicePropertiesKey returns the key for service properties
+func (h *Handler) servicePropertiesKey() []byte {
+	return []byte("queues/service/properties")
+}
+
+// GetServiceProperties returns queue service properties
+func (h *Handler) GetServiceProperties(w http.ResponseWriter, r *http.Request) {
+	h.log.Info("getting queue service properties")
+
+	key := h.servicePropertiesKey()
+	data, closer, err := h.db.Get(key)
+
+	var props ServiceProperties
+	if err == nil {
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		closer.Close()
+		json.Unmarshal(dataCopy, &props)
+	} else if err == pebble.ErrNotFound {
+		// Return default properties
+		props = ServiceProperties{
+			Logging: &Logging{
+				Version: "1.0",
+				Delete:  false,
+				Read:    false,
+				Write:   false,
+				RetentionPolicy: &RetentionPolicy{
+					Enabled: false,
+				},
+			},
+			HourMetrics: &Metrics{
+				Version: "1.0",
+				Enabled: false,
+				RetentionPolicy: &RetentionPolicy{
+					Enabled: false,
+				},
+			},
+			MinuteMetrics: &Metrics{
+				Version: "1.0",
+				Enabled: false,
+				RetentionPolicy: &RetentionPolicy{
+					Enabled: false,
+				},
+			},
+		}
+	} else {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Wrap in StorageServiceProperties for XML
+	type StorageServiceProperties struct {
+		XMLName       xml.Name `xml:"StorageServiceProperties"`
+		Logging       *Logging `xml:"Logging,omitempty"`
+		HourMetrics   *Metrics `xml:"HourMetrics,omitempty"`
+		MinuteMetrics *Metrics `xml:"MinuteMetrics,omitempty"`
+		CORS          *struct {
+			CORSRules []CORSRule `xml:"CorsRule"`
+		} `xml:"Cors,omitempty"`
+	}
+
+	response := StorageServiceProperties{
+		Logging:       props.Logging,
+		HourMetrics:   props.HourMetrics,
+		MinuteMetrics: props.MinuteMetrics,
+	}
+	if len(props.CORS) > 0 {
+		response.CORS = &struct {
+			CORSRules []CORSRule `xml:"CorsRule"`
+		}{CORSRules: props.CORS}
+	}
+
+	common.SetResponseHeaders(w, "")
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	xml.NewEncoder(w).Encode(response)
+}
+
+// SetServiceProperties sets queue service properties
+func (h *Handler) SetServiceProperties(w http.ResponseWriter, r *http.Request) {
+	h.log.Info("setting queue service properties")
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "InvalidInput", "Failed to read request body")
+		return
+	}
+
+	// Parse incoming XML
+	type StorageServicePropertiesInput struct {
+		XMLName       xml.Name `xml:"StorageServiceProperties"`
+		Logging       *Logging `xml:"Logging"`
+		HourMetrics   *Metrics `xml:"HourMetrics"`
+		MinuteMetrics *Metrics `xml:"MinuteMetrics"`
+		CORS          struct {
+			CORSRules []CORSRule `xml:"CorsRule"`
+		} `xml:"Cors"`
+	}
+
+	var input StorageServicePropertiesInput
+	if err := xml.Unmarshal(body, &input); err != nil {
+		h.writeError(w, http.StatusBadRequest, "InvalidXmlDocument", "Invalid XML format")
+		return
+	}
+
+	// Get existing properties to merge
+	key := h.servicePropertiesKey()
+	var props ServiceProperties
+
+	data, closer, err := h.db.Get(key)
+	if err == nil {
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		closer.Close()
+		json.Unmarshal(dataCopy, &props)
+	}
+
+	// Update properties
+	if input.Logging != nil {
+		props.Logging = input.Logging
+	}
+	if input.HourMetrics != nil {
+		props.HourMetrics = input.HourMetrics
+	}
+	if input.MinuteMetrics != nil {
+		props.MinuteMetrics = input.MinuteMetrics
+	}
+	if len(input.CORS.CORSRules) > 0 {
+		props.CORS = input.CORS.CORSRules
+	}
+
+	// Save
+	propsBytes, _ := json.Marshal(props)
+	if err := h.db.Set(key, propsBytes, pebble.Sync); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	common.SetResponseHeaders(w, "")
+	w.WriteHeader(http.StatusAccepted)
 }
