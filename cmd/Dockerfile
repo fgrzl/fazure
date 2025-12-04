@@ -13,6 +13,9 @@ COPY ../ .
 # Build the binary with optimizations
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /fazure ./cmd
 
+# Create data directory for the nonroot user (uid 65532)
+RUN mkdir -p /data && chown 65532:65532 /data
+
 # Final stage - minimal runtime image
 FROM gcr.io/distroless/static-debian12:nonroot
 
@@ -20,6 +23,9 @@ WORKDIR /
 
 # Copy the binary from builder
 COPY --from=builder /fazure /fazure
+
+# Copy data directory with correct ownership
+COPY --from=builder --chown=nonroot:nonroot /data /data
 
 # Expose port
 EXPOSE 10000

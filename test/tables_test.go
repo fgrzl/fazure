@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"testing"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/data/aztables"
 	"github.com/stretchr/testify/assert"
@@ -20,21 +18,7 @@ const (
 
 func skipTablesIfNotRunning(t *testing.T) {
 	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	req, _ := http.NewRequestWithContext(ctx, "GET", tableEmulatorURL+"/health", nil)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Do(req)
-
-	if err != nil || (resp != nil && resp.StatusCode != 200) {
-		t.Skip("Table emulator not running. Start with: docker compose up -d")
-	}
-
-	if resp != nil {
-		resp.Body.Close()
-	}
+	// Tests will fail naturally if server is not running
 }
 
 func newServiceClient(t *testing.T) *aztables.ServiceClient {

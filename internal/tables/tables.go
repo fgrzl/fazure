@@ -20,7 +20,12 @@ func SetStore(store *TableStore) {
 
 // RegisterRoutes registers table storage routes
 func RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/", handleRequest)
+	// Routes are registered at the root level with a dispatcher
+}
+
+// HandleRequest routes table requests - exported for use by main dispatcher
+func HandleRequest(w http.ResponseWriter, r *http.Request) {
+	handleRequest(w, r)
 }
 
 // handleRequest routes table requests

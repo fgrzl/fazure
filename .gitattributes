@@ -1,0 +1,43 @@
+# Auto detect text files and normalize line endings to LF
+* text=auto
+
+# Go files
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+# Bash/shell scripts
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows batch/PowerShell scripts
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Docker
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+compose.yml text eol=lf
+.dockerignore text eol=lf
+
+# YAML
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# JSON
+*.json text eol=lf
+
+# Markdown
+*.md text eol=lf
+
+# Config files
+*.conf text eol=lf
+*.config text eol=lf
+
+# Binary files
+*.a binary
+*.o binary
+*.so binary
+*.exe binary
+*.dll binary

@@ -24,8 +24,13 @@ func NewHandler(db *pebble.DB, logger *slog.Logger) *Handler {
 
 // RegisterRoutes registers blob storage routes
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/", h.handleRequest)
+	// Routes are registered at the root level with a dispatcher
 	h.log.Info("blob routes registered")
+}
+
+// HandleRequest routes blob requests
+func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
+	h.handleRequest(w, r)
 }
 
 // handleRequest routes blob requests
