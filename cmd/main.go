@@ -46,7 +46,7 @@ func main() {
 	db := store.DB()
 
 	// Initialize handlers
-	blobHandler := blobs.NewHandler(db, logger)
+	blobHandler := blobs.NewHandler(db, datadir, logger)
 	queueHandler := queues.NewHandler(db, logger)
 
 	// Initialize table store and handler

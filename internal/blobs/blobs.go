@@ -335,40 +335,47 @@ func (h *Handler) PutBlob(w http.ResponseWriter, r *http.Request, container, blo
 		return
 	}
 
-	// Store blob
-	key := h.blobKey(container, blob)
-	if err := h.db.Set(key, data, pebble.Sync); err != nil {
-		h.log.Error("failed to store blob", "container", container, "blob", blob, "error", err)
+	// Write blob data to filesystem
+	blobPath := h.blobFilePath(container, blob)
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0755); err != nil {
+		h.log.Error("failed to create blob directory", "container", container, "blob", blob, "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	if err := os.WriteFile(blobPath, data, 0644); err != nil {
+		h.log.Error("failed to write blob file", "container", container, "blob", blob, "error", err)
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 
-	// Store blob metadata
+	// Store blob metadata in Pebble
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 	etag := common.GenerateETag(data)
 
-	// Use json.Marshal to properly encode the metadata
-	metadataStruct := struct {
-		ContentType   string `json:"contentType"`
-		ContentLength int    `json:"contentLength"`
-		ETag          string `json:"etag"`
-		Created       string `json:"created"`
-	}{
+	metadata := BlobMetadata{
+		Container:     container,
+		Blob:          blob,
 		ContentType:   contentType,
-		ContentLength: len(data),
+		ContentLength: int64(len(data)),
 		ETag:          etag,
-		Created:       time.Now().UTC().Format(time.RFC3339),
+		Created:       time.Now().UTC(),
+		Modified:      time.Now().UTC(),
+		FilePath:      blobPath,
 	}
-	metadataBytes, _ := json.Marshal(metadataStruct)
+	metadataBytes, _ := json.Marshal(metadata)
 	metaKey := h.blobMetaKey(container, blob)
 	if err := h.db.Set(metaKey, metadataBytes, pebble.Sync); err != nil {
 		h.log.Error("failed to store blob metadata", "container", container, "blob", blob, "error", err)
+		// Clean up the file we wrote
+		os.Remove(blobPath)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
 	}
 
-	h.log.Info("blob uploaded", "container", container, "blob", blob, "size", len(data))
+	h.log.Info("blob uploaded", "container", container, "blob", blob, "size", len(data), "path", blobPath)
 	common.SetResponseHeaders(w, etag)
 	w.WriteHeader(http.StatusCreated)
 }
@@ -377,53 +384,43 @@ func (h *Handler) PutBlob(w http.ResponseWriter, r *http.Request, container, blo
 func (h *Handler) GetBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
 	h.log.Debug("downloading blob", "container", container, "blob", blob)
 
-	key := h.blobKey(container, blob)
-	data, closer, err := h.db.Get(key)
+	// Get metadata from Pebble
+	metaKey := h.blobMetaKey(container, blob)
+	metaData, metaCloser, err := h.db.Get(metaKey)
 	if err == pebble.ErrNotFound {
 		h.log.Debug("blob not found", "container", container, "blob", blob)
 		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The specified blob does not exist")
 		return
 	}
 	if err != nil {
-		h.log.Error("failed to get blob", "container", container, "blob", blob, "error", err)
+		h.log.Error("failed to get blob metadata", "container", container, "blob", blob, "error", err)
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer closer.Close()
 
-	// Make a copy of data before closer.Close()
-	blobData := make([]byte, len(data))
-	copy(blobData, data)
+	// Make a copy of metadata before closing
+	metaDataCopy := make([]byte, len(metaData))
+	copy(metaDataCopy, metaData)
+	metaCloser.Close()
 
-	// Get metadata for ETag and content type
-	metaKey := h.blobMetaKey(container, blob)
-	metaData, metaCloser, metaErr := h.db.Get(metaKey)
-	etag := ""
-	contentType := "application/octet-stream"
-	if metaErr == nil {
-		// Make a copy of metadata before using it
-		metaDataCopy := make([]byte, len(metaData))
-		copy(metaDataCopy, metaData)
-		metaCloser.Close()
+	var meta BlobMetadata
+	if err := json.Unmarshal(metaDataCopy, &meta); err != nil {
+		h.log.Error("failed to parse blob metadata", "container", container, "blob", blob, "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", "Invalid metadata")
+		return
+	}
 
-		var meta struct {
-			ETag        string `json:"etag"`
-			ContentType string `json:"contentType"`
-		}
-		if json.Unmarshal(metaDataCopy, &meta) == nil {
-			etag = meta.ETag
-			if meta.ContentType != "" {
-				contentType = meta.ContentType
-			}
-		}
-		h.log.Debug("blob metadata retrieved", "container", container, "blob", blob, "etag", etag, "contentType", contentType)
-	} else {
-		h.log.Debug("blob metadata not found", "container", container, "blob", blob, "error", metaErr)
+	// Read blob data from filesystem
+	blobData, err := os.ReadFile(meta.FilePath)
+	if err != nil {
+		h.log.Error("failed to read blob file", "container", container, "blob", blob, "path", meta.FilePath, "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
 	}
 
 	h.log.Debug("blob downloaded", "container", container, "blob", blob, "size", len(blobData))
-	common.SetResponseHeaders(w, etag)
-	common.SetBlobHeaders(w, contentType, int64(len(blobData)))
+	common.SetResponseHeaders(w, meta.ETag)
+	common.SetBlobHeaders(w, meta.ContentType, int64(len(blobData)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(blobData)
 }
@@ -432,8 +429,9 @@ func (h *Handler) GetBlob(w http.ResponseWriter, r *http.Request, container, blo
 func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, container, blob string) {
 	h.log.Debug("getting blob properties", "container", container, "blob", blob)
 
-	key := h.blobKey(container, blob)
-	data, closer, err := h.db.Get(key)
+	// Get metadata from Pebble
+	metaKey := h.blobMetaKey(container, blob)
+	metaData, metaCloser, err := h.db.Get(metaKey)
 	if err == pebble.ErrNotFound {
 		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The specified blob does not exist")
 		return
@@ -442,30 +440,21 @@ func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer closer.Close()
 
-	// Get metadata for ETag
-	metaKey := h.blobMetaKey(container, blob)
-	metaData, metaCloser, err := h.db.Get(metaKey)
-	etag := ""
-	contentType := "application/octet-stream"
-	if err == nil {
-		defer metaCloser.Close()
-		// Parse metadata JSON to extract ETag and content type
-		var meta struct {
-			ETag        string `json:"etag"`
-			ContentType string `json:"contentType"`
-		}
-		if json.Unmarshal(metaData, &meta) == nil {
-			etag = meta.ETag
-			if meta.ContentType != "" {
-				contentType = meta.ContentType
-			}
-		}
+	// Make a copy of metadata before closing
+	metaDataCopy := make([]byte, len(metaData))
+	copy(metaDataCopy, metaData)
+	metaCloser.Close()
+
+	var meta BlobMetadata
+	if err := json.Unmarshal(metaDataCopy, &meta); err != nil {
+		h.log.Error("failed to parse blob metadata", "container", container, "blob", blob, "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", "Invalid metadata")
+		return
 	}
 
-	common.SetResponseHeaders(w, etag)
-	common.SetBlobHeaders(w, contentType, int64(len(data)))
+	common.SetResponseHeaders(w, meta.ETag)
+	common.SetBlobHeaders(w, meta.ContentType, meta.ContentLength)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -473,10 +462,10 @@ func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 func (h *Handler) DeleteBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
 	h.log.Info("deleting blob", "container", container, "blob", blob)
 
-	key := h.blobKey(container, blob)
+	metaKey := h.blobMetaKey(container, blob)
 
-	// Check if blob exists
-	_, closer, err := h.db.Get(key)
+	// Get metadata to find the file path
+	metaData, closer, err := h.db.Get(metaKey)
 	if err == pebble.ErrNotFound {
 		h.log.Debug("blob not found for deletion", "container", container, "blob", blob)
 		h.writeError(w, http.StatusNotFound, "BlobNotFound", "The specified blob does not exist")
@@ -486,15 +475,23 @@ func (h *Handler) DeleteBlob(w http.ResponseWriter, r *http.Request, container, 
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
+
+	// Make a copy of metadata before closing
+	metaDataCopy := make([]byte, len(metaData))
+	copy(metaDataCopy, metaData)
 	closer.Close()
 
-	// Delete blob and metadata
-	batch := h.db.NewBatch()
-	batch.Delete(key, nil)
-	batch.Delete(h.blobMetaKey(container, blob), nil)
+	var meta BlobMetadata
+	if err := json.Unmarshal(metaDataCopy, &meta); err == nil && meta.FilePath != "" {
+		// Delete the blob file from filesystem
+		if err := os.Remove(meta.FilePath); err != nil && !os.IsNotExist(err) {
+			h.log.Error("failed to delete blob file", "path", meta.FilePath, "error", err)
+		}
+	}
 
-	if err := batch.Commit(pebble.Sync); err != nil {
-		h.log.Error("failed to delete blob", "container", container, "blob", blob, "error", err)
+	// Delete metadata from Pebble
+	if err := h.db.Delete(metaKey, pebble.Sync); err != nil {
+		h.log.Error("failed to delete blob metadata", "container", container, "blob", blob, "error", err)
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
@@ -521,7 +518,8 @@ func (h *Handler) ListBlobs(w http.ResponseWriter, r *http.Request, container st
 	}
 	closer.Close()
 
-	prefix := []byte(fmt.Sprintf("blobs/data/%s/", container))
+	// Use metadata keys prefix instead of data keys
+	prefix := []byte(fmt.Sprintf("blobs/meta/%s/", container))
 	iter, err := h.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: append(prefix, 0xff),
