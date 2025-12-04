@@ -162,6 +162,11 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // writeError writes an Azure Storage error response
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
+	h.log.Warn("error response",
+		"statusCode", statusCode,
+		"errorCode", errorCode,
+		"message", message,
+	)
 	common.WriteErrorResponse(w, statusCode, errorCode, message)
 }
 
@@ -887,7 +892,7 @@ func (h *Handler) servicePropertiesKey() []byte {
 
 // GetServiceProperties returns queue service properties
 func (h *Handler) GetServiceProperties(w http.ResponseWriter, r *http.Request) {
-	h.log.Info("getting queue service properties")
+	h.log.Debug("getting queue service properties")
 
 	key := h.servicePropertiesKey()
 	data, closer, err := h.db.Get(key)
@@ -960,7 +965,7 @@ func (h *Handler) GetServiceProperties(w http.ResponseWriter, r *http.Request) {
 
 // SetServiceProperties sets queue service properties
 func (h *Handler) SetServiceProperties(w http.ResponseWriter, r *http.Request) {
-	h.log.Info("setting queue service properties")
+	h.log.Debug("setting queue service properties")
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

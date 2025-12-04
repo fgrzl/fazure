@@ -121,12 +121,17 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // writeError writes an Azure Storage error response
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
+	h.log.Warn("error response",
+		"statusCode", statusCode,
+		"errorCode", errorCode,
+		"message", message,
+	)
 	common.WriteErrorResponse(w, statusCode, errorCode, message)
 }
 
 // ListTables lists all tables
 func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
-	h.log.Info("listing tables")
+	h.log.Debug("listing tables")
 
 	tables, err := h.store.ListTables(context.Background())
 	if err != nil {
@@ -135,7 +140,7 @@ func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.log.Info("tables listed", "count", len(tables))
+	h.log.Debug("tables listed", "count", len(tables))
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]interface{}{

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -36,11 +34,12 @@ func main() {
 	// Initialize shared Pebble store
 	store, err := common.NewStore(datadir)
 	if err != nil {
-		log.Fatalf("Failed to initialize storage: %v", err)
+		logger.Error("failed to initialize storage", "path", datadir, "error", err)
+		os.Exit(1)
 	}
 	defer store.Close()
 
-	logger.Info("pebble database opened", "path", datadir)
+	logger.Info("pebble database initialized", "path", datadir)
 
 	// Get the underlying Pebble DB
 	db := store.DB()
@@ -52,7 +51,8 @@ func main() {
 	// Initialize table store and handler
 	tableStore, err := tables.NewTableStore(store)
 	if err != nil {
-		log.Fatalf("Failed to initialize table storage: %v", err)
+		logger.Error("failed to initialize table storage", "error", err)
+		os.Exit(1)
 	}
 	tableHandler := tables.NewHandler(tableStore, logger)
 
@@ -70,10 +70,24 @@ func main() {
 	queueMux.HandleFunc("/health", healthHandler)
 	tableMux.HandleFunc("/health", healthHandler)
 
-	// Route all requests to appropriate handlers
-	blobMux.HandleFunc("/", blobHandler.HandleRequest)
-	queueMux.HandleFunc("/", queueHandler.HandleRequest)
-	tableMux.HandleFunc("/", tableHandler.HandleRequest)
+	// Request logging middleware
+	logRequest := func(service string, next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			logger.Debug("request received",
+				"service", service,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
+				"contentLength", r.ContentLength,
+			)
+			next(w, r)
+		}
+	}
+
+	// Route all requests to appropriate handlers with logging
+	blobMux.HandleFunc("/", logRequest("blob", blobHandler.HandleRequest))
+	queueMux.HandleFunc("/", logRequest("queue", queueHandler.HandleRequest))
+	tableMux.HandleFunc("/", logRequest("table", tableHandler.HandleRequest))
 
 	// Start servers
 	errChan := make(chan error, 3)
@@ -99,12 +113,16 @@ func main() {
 		errChan <- srv.ListenAndServe()
 	}()
 
-	fmt.Println("Azure Storage Emulator started")
-	fmt.Printf("  Blob service:  http://localhost:%s\n", blobPort)
-	fmt.Printf("  Queue service: http://localhost:%s\n", queuePort)
-	fmt.Printf("  Table service: http://localhost:%s\n", tablePort)
-	fmt.Printf("  Data directory: %s\n", datadir)
+	logger.Info("fazure storage emulator started",
+		"blobService", "http://localhost:"+blobPort,
+		"queueService", "http://localhost:"+queuePort,
+		"tableService", "http://localhost:"+tablePort,
+		"dataDir", datadir,
+	)
 
 	// Wait for any server to fail
-	log.Fatal(<-errChan)
+	if err := <-errChan; err != nil {
+		logger.Error("server error", "error", err)
+		os.Exit(1)
+	}
 }
