@@ -168,3 +168,55 @@ func SelectFields(entity map[string]interface{}, fields []string) map[string]int
 	}
 	return result
 }
+
+// extractPartitionKeyFromFilter extracts PartitionKey equality value from OData filter
+// This allows optimizing queries by scanning only the relevant partition
+func extractPartitionKeyFromFilter(filter string) string {
+	if filter == "" {
+		return ""
+	}
+
+	filter = strings.TrimSpace(filter)
+
+	// Look for PartitionKey eq 'value' pattern
+	// Handle both standalone and AND-combined filters
+	parts := strings.Split(strings.ToLower(filter), " and ")
+	originalParts := splitPreservingCase(filter, " and ")
+
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "partitionkey eq ") {
+			// Extract the value from the original (case-preserved) part
+			origPart := strings.TrimSpace(originalParts[i])
+			idx := findOperatorIndex(origPart, " eq ")
+			if idx >= 0 {
+				value := strings.TrimSpace(origPart[idx+4:])
+				// Remove quotes
+				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+					return value[1 : len(value)-1]
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// splitPreservingCase splits a string by separator (case-insensitive) while preserving original case
+func splitPreservingCase(s, sep string) []string {
+	lowerS := strings.ToLower(s)
+	lowerSep := strings.ToLower(sep)
+
+	var result []string
+	start := 0
+	for {
+		idx := strings.Index(lowerS[start:], lowerSep)
+		if idx == -1 {
+			result = append(result, s[start:])
+			break
+		}
+		result = append(result, s[start:start+idx])
+		start = start + idx + len(sep)
+	}
+	return result
+}

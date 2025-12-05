@@ -1,4 +1,4 @@
-package tables
+﻿package tables
 
 import (
 	"context"
@@ -126,7 +126,7 @@ func (ts *TableStore) CreateTable(ctx context.Context, tableName string) error {
 	}
 	data, _ := json.Marshal(metadata)
 
-	return db.Set(key, data, pebble.Sync)
+	return db.Set(key, data, pebble.NoSync)
 }
 
 // DeleteTable deletes a table and all its entities
@@ -145,7 +145,7 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	closer.Close()
 
 	// Delete table metadata
-	if err := db.Delete(metaKey, pebble.Sync); err != nil {
+	if err := db.Delete(metaKey, pebble.NoSync); err != nil {
 		return err
 	}
 
@@ -165,7 +165,7 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 		batch.Delete(iter.Key(), nil)
 	}
 
-	return batch.Commit(pebble.Sync)
+	return batch.Commit(pebble.NoSync)
 }
 
 // GetTable returns a table handle
@@ -195,12 +195,7 @@ type Table struct {
 	name  string
 }
 
-func (ts *TableStore) newTable(name string) *Table {
-	return &Table{
-		store: ts.store,
-		name:  name,
-	}
-} // InsertEntity inserts a new entity
+// InsertEntity inserts a new entity
 func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}) (*Entity, error) {
 	db := t.store.DB()
 	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
@@ -233,7 +228,7 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		return nil, err
 	}
 
-	if err := db.Set(key, data, pebble.Sync); err != nil {
+	if err := db.Set(key, data, pebble.NoSync); err != nil {
 		return nil, err
 	}
 
@@ -333,7 +328,7 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 		return nil, err
 	}
 
-	if err := db.Set(key, data, pebble.Sync); err != nil {
+	if err := db.Set(key, data, pebble.NoSync); err != nil {
 		return nil, err
 	}
 
@@ -397,7 +392,7 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		return nil, err
 	}
 
-	if err := db.Set(key, finalData, pebble.Sync); err != nil {
+	if err := db.Set(key, finalData, pebble.NoSync); err != nil {
 		return nil, err
 	}
 
@@ -419,7 +414,7 @@ func (t *Table) DeleteEntity(ctx context.Context, partitionKey, rowKey string) e
 	}
 	closer.Close()
 
-	return db.Delete(key, pebble.Sync)
+	return db.Delete(key, pebble.NoSync)
 }
 
 // ListEntities lists all entities in the table
@@ -451,7 +446,21 @@ func (t *Table) ListEntities(ctx context.Context) ([]*Entity, error) {
 // QueryEntities queries entities with filters and pagination
 func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selectFields []string, nextPK, nextRK string) ([]*Entity, string, string, error) {
 	db := t.store.DB()
-	prefix := []byte(fmt.Sprintf("tables/data/%s/", t.name))
+
+	// Extract partition key from filter to optimize the scan range
+	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
+
+	// Build prefix based on partition key filter
+	var prefix, upperBound []byte
+	if partitionKeyFilter != "" {
+		// If we have a partition key filter, scan only that partition
+		prefix = []byte(fmt.Sprintf("tables/data/%s/%s/", t.name, partitionKeyFilter))
+		upperBound = append(prefix, 0xff)
+	} else {
+		// Full table scan
+		prefix = []byte(fmt.Sprintf("tables/data/%s/", t.name))
+		upperBound = append(prefix, 0xff)
+	}
 
 	// Set lower bound based on continuation token
 	lowerBound := prefix
@@ -461,7 +470,7 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
-		UpperBound: append(prefix, 0xff),
+		UpperBound: upperBound,
 	})
 	if err != nil {
 		return nil, "", "", err
@@ -473,6 +482,14 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 	limit := top
 	if limit <= 0 {
 		limit = 1000 // Default page size
+	}
+
+	// Pre-parse the filter once for efficiency
+	var filterFunc func(entity map[string]interface{}) bool
+	if filter != "" {
+		filterFunc = func(entity map[string]interface{}) bool {
+			return MatchesFilter(filter, entity)
+		}
 	}
 
 	for iter.First(); iter.Valid(); iter.Next() {
@@ -487,7 +504,7 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 		}
 
 		// Apply filter if specified
-		if filter != "" {
+		if filterFunc != nil {
 			// Convert entity to map for filtering
 			entityMap := map[string]interface{}{
 				"PartitionKey": entity.PartitionKey,
@@ -496,7 +513,7 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 			for k, v := range entity.Properties {
 				entityMap[k] = v
 			}
-			if !MatchesFilter(filter, entityMap) {
+			if !filterFunc(entityMap) {
 				continue
 			}
 		}

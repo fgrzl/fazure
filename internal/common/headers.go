@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SetResponseHeaders adds standard Azure Storage response headers
@@ -42,7 +44,7 @@ func WriteErrorResponse(w http.ResponseWriter, statusCode int, errorCode, messag
 
 // GenerateRequestID creates a unique request ID
 func GenerateRequestID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return uuid.NewString()
 }
 
 // ValidateSASToken validates a SAS token signature

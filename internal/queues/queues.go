@@ -13,6 +13,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/fgrzl/fazure/internal/common"
+	"github.com/google/uuid"
 )
 
 // Handler handles queue storage operations
@@ -182,12 +183,12 @@ func (h *Handler) messageKey(queue, messageID string) []byte {
 
 // generateMessageID generates a unique message ID
 func (h *Handler) generateMessageID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return uuid.NewString()
 }
 
 // generatePopReceipt generates a unique pop receipt
 func (h *Handler) generatePopReceipt() string {
-	return fmt.Sprintf("pop-%d", time.Now().UnixNano())
+	return uuid.NewString()
 }
 
 // CreateQueue creates a new queue
