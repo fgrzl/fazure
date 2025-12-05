@@ -13,9 +13,10 @@ import (
 )
 
 func main() {
-	// Initialize logger
+	// Initialize logger with configurable log level
+	logLevel := getLogLevel(os.Getenv("LOG_LEVEL"))
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: logLevel,
 	}))
 	slog.SetDefault(logger)
 
@@ -125,4 +126,13 @@ func main() {
 		logger.Error("server error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// getLogLevel parses LOG_LEVEL env var into slog.Level
+func getLogLevel(level string) slog.Level {
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(level)); err != nil {
+		return slog.LevelInfo // default
+	}
+	return l
 }

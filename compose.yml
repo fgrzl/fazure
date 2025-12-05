@@ -8,6 +8,8 @@ services:
       - "10000:10000"  # Blob service
       - "10001:10001"  # Queue service
       - "10002:10002"  # Table service
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     # Uncomment the volumes section below to persist data to a local directory
     # volumes:
     #   - ./data:/data
