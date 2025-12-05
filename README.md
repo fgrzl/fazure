@@ -1,4 +1,4 @@
-# 🚀 Fazure - Azure Storage Emulator
+# Fazure - Azure Storage Emulator
 
 A lightweight, Pebble-backed emulator for **Azure Blobs, Queues, and Tables**, designed for local development and integration testing.
 
@@ -166,10 +166,6 @@ Planned / missing items:
 - ❌ Full SAS token compatibility and AD/OAuth authentication
 - ❌ Advanced Queue ACL features
 - ❌ Table ACL / RBAC
-
-## 📚 Specification
-
-See [SPEC.md](SPEC.md) for detailed API documentation.
 
 ## 📄 License
 
