@@ -580,6 +580,8 @@ func (t *Table) QueryEntities(
 	fullScan := false
 	db := t.store.DB()
 	scanned := 0
+	pkHint := ""
+	scanReason := ""
 
 	defer func() {
 		if t.metrics != nil {
@@ -596,6 +598,7 @@ func (t *Table) QueryEntities(
 	}()
 
 	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
+	pkHint = partitionKeyFilter
 
 	var (
 		lowerBound []byte
@@ -609,7 +612,11 @@ func (t *Table) QueryEntities(
 
 		t.log.Debug("query using partition prefix",
 			"partitionKey", partitionKeyFilter,
-			"prefix", string(prefix))
+			"prefix", string(prefix),
+			"filter", filter,
+			"top", top,
+			"continuation", nextPK != "" || nextRK != "",
+		)
 	} else {
 		fullScan = true
 		prefix := tablePrefix(t.name)
@@ -617,10 +624,19 @@ func (t *Table) QueryEntities(
 		upperBound = upperBoundForPrefix(prefix)
 
 		if filter != "" {
-			t.log.Warn("query falling back to full table scan: failed to extract PartitionKey from filter",
-				"filter", filter)
+			scanReason = "filter not partition-restricted"
+			t.log.Warn("query falling back to full table scan",
+				"reason", scanReason,
+				"filter", filter,
+				"top", top,
+				"continuation", nextPK != "" || nextRK != "",
+			)
 		} else {
-			t.log.Debug("query using full table scan (no filter)")
+			scanReason = "no filter provided"
+			t.log.Debug("query using full table scan (no filter)",
+				"top", top,
+				"continuation", nextPK != "" || nextRK != "",
+			)
 		}
 	}
 
@@ -638,7 +654,12 @@ func (t *Table) QueryEntities(
 		return
 	}
 	defer iter.Close()
-	t.log.Debug("iterator created", "elapsed", time.Since(iterStart))
+	t.log.Debug("iterator created",
+		"elapsed", time.Since(iterStart),
+		"pkHint", pkHint,
+		"fullScan", fullScan,
+		"scanReason", scanReason,
+	)
 
 	limit := top
 	if limit <= 0 {
@@ -670,6 +691,9 @@ func (t *Table) QueryEntities(
 			"totalTime", total,
 			"hasMore", hasMore,
 			"fullScan", fullScan,
+			"pkHint", pkHint,
+			"scanReason", scanReason,
+			"slow", elapsed >= slowQueryThreshold,
 		)
 	}
 
@@ -704,6 +728,9 @@ func (t *Table) QueryEntities(
 			}
 			match, matchErr := filterFunc(entityMap)
 			if matchErr != nil {
+				if errors.Is(matchErr, ErrInvalidFilter) {
+					t.log.Warn("invalid filter during evaluation", "filter", filter, "error", matchErr)
+				}
 				err = matchErr
 				return
 			}

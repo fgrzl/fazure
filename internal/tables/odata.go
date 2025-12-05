@@ -105,12 +105,10 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 			left := strings.TrimSpace(filter[:idx])
 			right := strings.TrimSpace(filter[idx+len(op.op)+2:])
 
-			// Remove quotes from right side if present (string value)
 			if strings.HasPrefix(right, "'") && strings.HasSuffix(right, "'") {
 				right = right[1 : len(right)-1]
 			}
 
-			// Get value from entity
 			val, ok := entity[left]
 			if !ok {
 				return false, nil
@@ -120,7 +118,7 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 		}
 	}
 
-	return false, ErrInvalidFilter
+	return false, fmt.Errorf("unsupported or invalid filter expression: %q: %w", filter, ErrInvalidFilter)
 }
 
 // compareValues compares two values, handling type conversion
