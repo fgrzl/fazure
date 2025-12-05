@@ -9,8 +9,11 @@ services:
       - "10001:10001"  # Queue service
       - "10002:10002"  # Table service
     environment:
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-    # Uncomment the volumes section below to persist data to a local directory
-    # volumes:
-    #   - ./data:/data
+      - LOG_LEVEL=debug
+      - DATA_DIR=/data
+    volumes:
+      - fazure-data:/data
     restart: unless-stopped
+
+volumes:
+  fazure-data:

@@ -472,8 +472,41 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 		w.Header().Set("x-ms-continuation-NextRowKey", contRK)
 	}
 
+	// Apply $select projection if specified
+	var responseEntities []map[string]interface{}
+	for _, entity := range entities {
+		// Convert entity to map
+		entityMap := map[string]interface{}{
+			"PartitionKey": entity.PartitionKey,
+			"RowKey":       entity.RowKey,
+			"Timestamp":    entity.Timestamp.Unix(),
+			"ETag":         entity.ETag,
+		}
+		for k, v := range entity.Properties {
+			entityMap[k] = v
+		}
+
+		// Apply $select if specified (always include PK, RK, Timestamp, ETag)
+		if len(selectFields) > 0 {
+			projected := map[string]interface{}{
+				"PartitionKey": entity.PartitionKey,
+				"RowKey":       entity.RowKey,
+				"Timestamp":    entity.Timestamp.Unix(),
+				"ETag":         entity.ETag,
+			}
+			for _, field := range selectFields {
+				if val, ok := entityMap[field]; ok {
+					projected[field] = val
+				}
+			}
+			responseEntities = append(responseEntities, projected)
+		} else {
+			responseEntities = append(responseEntities, entityMap)
+		}
+	}
+
 	response := map[string]interface{}{
-		"value": entities,
+		"value": responseEntities,
 	}
 	json.NewEncoder(w).Encode(response)
 }
