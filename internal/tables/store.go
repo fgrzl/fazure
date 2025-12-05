@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/fgrzl/fazure/internal/common"
 )
 

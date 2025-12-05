@@ -9,9 +9,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/fgrzl/fazure/internal/common"
 	"github.com/google/uuid"
 )
@@ -20,6 +21,7 @@ import (
 type Handler struct {
 	db  *pebble.DB
 	log *slog.Logger
+	mu  sync.Mutex // protects message dequeue operations for competing consumers
 }
 
 // RFC1123Time wraps time.Time to marshal/unmarshal using RFC1123 format (Azure requirement)
@@ -492,6 +494,10 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 		return
 	}
 	closer.Close()
+
+	// Lock to prevent competing consumers from dequeuing the same message
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
 	// Get visible messages
 	prefix := []byte(fmt.Sprintf("queues/data/%s/", queue))

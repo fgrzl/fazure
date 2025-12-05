@@ -3,9 +3,15 @@ package common
 import (
 	"fmt"
 
-	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/bloom"
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/bloom"
+	"github.com/cockroachdb/pebble/v2/sstable/block"
 )
+
+// snappyCompression returns a Snappy compression profile for level options
+func snappyCompression() *block.CompressionProfile {
+	return block.SnappyCompression
+}
 
 // Store provides a shared Pebble instance for all emulators
 type Store struct {
@@ -27,16 +33,17 @@ func (s *Store) SyncWriteOptions() *pebble.WriteOptions {
 // NewStore creates a new shared storage instance
 func NewStore(datadir string) (*Store, error) {
 	opts := &pebble.Options{
-		MaxConcurrentCompactions: func() int { return 4 },
+		// Control concurrent compactions (min 4, max 4)
+		CompactionConcurrencyRange: func() (int, int) { return 4, 4 },
 		// Use bloom filters for faster point lookups
-		Levels: []pebble.LevelOptions{
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: pebble.SnappyCompression},
+		Levels: [7]pebble.LevelOptions{
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
 		},
 		// Increase memtable size for better write performance
 		MemTableSize: 64 * 1024 * 1024, // 64MB

@@ -1001,6 +1001,9 @@ func TestShouldRenewContainerLeaseGivenActivLeaseWhenCallingRenewLease(t *testin
 	client := newBlobServiceClient(t)
 	containerName := "test-container-lease-renew"
 
+	// Cleanup first in case container exists from a previous run
+	client.DeleteContainer(ctx, containerName, nil)
+
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
