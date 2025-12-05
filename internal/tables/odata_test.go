@@ -4,7 +4,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func mustMatch(t *testing.T, filter string, entity map[string]interface{}) bool {
+	t.Helper()
+	result, err := MatchesFilter(filter, entity)
+	require.NoError(t, err)
+	return result
+}
+
+func TestShouldReturnErrorGivenUnsupportedFilterFunction(t *testing.T) {
+	entity := map[string]interface{}{
+		"PartitionKey": "pk",
+		"RowKey":       "rk",
+		"Name":         "Alice",
+	}
+
+	_, err := MatchesFilter("contains(Name,'A')", entity)
+	require.ErrorIs(t, err, ErrInvalidFilter)
+}
 
 // ============================================================================
 // MatchesFilter Tests
@@ -18,7 +37,7 @@ func TestShouldMatchAllEntitiesGivenEmptyFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("", entity)
+	result := mustMatch(t, "", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -33,7 +52,7 @@ func TestShouldMatchEntityGivenEqualStringFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active'", entity)
+	result := mustMatch(t, "Status eq 'active'", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -48,7 +67,7 @@ func TestShouldNotMatchEntityGivenNonMatchingStringFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'inactive'", entity)
+	result := mustMatch(t, "Status eq 'inactive'", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -63,7 +82,7 @@ func TestShouldMatchEntityGivenEqualNumericFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Score eq 100", entity)
+	result := mustMatch(t, "Score eq 100", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -78,7 +97,7 @@ func TestShouldMatchEntityGivenNotEqualFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Type ne 'B'", entity)
+	result := mustMatch(t, "Type ne 'B'", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -93,7 +112,7 @@ func TestShouldNotMatchEntityGivenNotEqualFilterWithSameValue(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Type ne 'A'", entity)
+	result := mustMatch(t, "Type ne 'A'", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -108,7 +127,7 @@ func TestShouldMatchEntityGivenGreaterThanFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Age gt 20", entity)
+	result := mustMatch(t, "Age gt 20", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -123,7 +142,7 @@ func TestShouldNotMatchEntityGivenGreaterThanFilterWithEqualValue(t *testing.T) 
 	}
 
 	// Act
-	result := MatchesFilter("Age gt 30", entity)
+	result := mustMatch(t, "Age gt 30", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -138,7 +157,7 @@ func TestShouldMatchEntityGivenGreaterThanOrEqualFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Age ge 30", entity)
+	result := mustMatch(t, "Age ge 30", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -153,7 +172,7 @@ func TestShouldMatchEntityGivenLessThanFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Age lt 40", entity)
+	result := mustMatch(t, "Age lt 40", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -168,7 +187,7 @@ func TestShouldNotMatchEntityGivenLessThanFilterWithEqualValue(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Age lt 30", entity)
+	result := mustMatch(t, "Age lt 30", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -183,7 +202,7 @@ func TestShouldMatchEntityGivenLessThanOrEqualFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Age le 30", entity)
+	result := mustMatch(t, "Age le 30", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -199,7 +218,7 @@ func TestShouldMatchEntityGivenAndOperatorWithBothConditionsTrue(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active' and Priority eq 1", entity)
+	result := mustMatch(t, "Status eq 'active' and Priority eq 1", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -215,7 +234,7 @@ func TestShouldNotMatchEntityGivenAndOperatorWithOneConditionFalse(t *testing.T)
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active' and Priority eq 2", entity)
+	result := mustMatch(t, "Status eq 'active' and Priority eq 2", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -230,7 +249,7 @@ func TestShouldMatchEntityGivenOrOperatorWithOneConditionTrue(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active' or Status eq 'pending'", entity)
+	result := mustMatch(t, "Status eq 'active' or Status eq 'pending'", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -245,7 +264,7 @@ func TestShouldNotMatchEntityGivenOrOperatorWithBothConditionsFalse(t *testing.T
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active' or Status eq 'pending'", entity)
+	result := mustMatch(t, "Status eq 'active' or Status eq 'pending'", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -261,7 +280,7 @@ func TestShouldMatchEntityGivenUppercaseAndOperator(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active' AND Priority eq 1", entity)
+	result := mustMatch(t, "Status eq 'active' AND Priority eq 1", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -275,7 +294,7 @@ func TestShouldNotMatchEntityGivenMissingProperty(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("Status eq 'active'", entity)
+	result := mustMatch(t, "Status eq 'active'", entity)
 
 	// Assert
 	assert.False(t, result)
@@ -289,7 +308,7 @@ func TestShouldMatchEntityGivenPartitionKeyFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("PartitionKey eq 'partition1'", entity)
+	result := mustMatch(t, "PartitionKey eq 'partition1'", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -303,7 +322,7 @@ func TestShouldMatchEntityGivenRowKeyFilter(t *testing.T) {
 	}
 
 	// Act
-	result := MatchesFilter("RowKey eq 'row1'", entity)
+	result := mustMatch(t, "RowKey eq 'row1'", entity)
 
 	// Assert
 	assert.True(t, result)
@@ -344,6 +363,17 @@ func TestShouldExtractPartitionKeyGivenFilterWithPartitionKeyNotFirst(t *testing
 
 	// Assert
 	assert.Equal(t, "mypartition", result)
+}
+
+func TestShouldExtractPartitionKeyGivenHexEncodedValue(t *testing.T) {
+	// Arrange - exact filter from production logs
+	filter := "PartitionKey eq '53010069030068796464656e'"
+
+	// Act
+	result := extractPartitionKeyFromFilter(filter)
+
+	// Assert
+	assert.Equal(t, "53010069030068796464656e", result)
 }
 
 func TestShouldReturnEmptyStringGivenFilterWithoutPartitionKey(t *testing.T) {

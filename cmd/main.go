@@ -48,9 +48,10 @@ func main() {
 	// Initialize handlers
 	blobHandler := blobs.NewHandler(db, datadir, logger)
 	queueHandler := queues.NewHandler(db, logger)
+	tableMetrics := tables.NewMetrics()
 
 	// Initialize table store and handler
-	tableStore, err := tables.NewTableStore(store)
+	tableStore, err := tables.NewTableStore(store, logger, tableMetrics)
 	if err != nil {
 		logger.Error("failed to initialize table storage", "error", err)
 		os.Exit(1)
@@ -70,6 +71,16 @@ func main() {
 	blobMux.HandleFunc("/health", healthHandler)
 	queueMux.HandleFunc("/health", healthHandler)
 	tableMux.HandleFunc("/health", healthHandler)
+
+	// Debug metrics endpoint
+	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(store.Metrics()))
+		w.Write([]byte("\n\n[tables]\n"))
+		w.Write([]byte(tableMetrics.String()))
+	}
+	tableMux.HandleFunc("/debug/metrics", metricsHandler)
 
 	// Request logging middleware
 	logRequest := func(service string, next http.HandlerFunc) http.HandlerFunc {

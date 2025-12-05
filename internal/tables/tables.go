@@ -5,24 +5,32 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/fgrzl/fazure/internal/common"
 )
 
-// Handler handles table storage operations
+// Precompiled patterns for entity and table URIs.
+var (
+	entityPathRe  = regexp.MustCompile(`^([^(]+)\(PartitionKey='([^']+)',RowKey='([^']+)'\)$`)
+	deleteTableRe = regexp.MustCompile(`Tables\('([^']+)'\)`)
+)
+
+// Handler handles table storage operations.
 type Handler struct {
 	store *TableStore
 	log   *slog.Logger
 }
 
-// NewHandler creates a new table handler
+// NewHandler creates a new table handler.
 func NewHandler(store *TableStore, logger *slog.Logger) *Handler {
 	return &Handler{
 		store: store,
@@ -30,17 +38,17 @@ func NewHandler(store *TableStore, logger *slog.Logger) *Handler {
 	}
 }
 
-// RegisterRoutes registers table storage routes
+// RegisterRoutes registers table storage routes (main dispatcher uses HandleRequest).
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	h.log.Info("table routes registered")
 }
 
-// HandleRequest routes table requests - exported for use by main dispatcher
+// HandleRequest routes table requests - exported for use by main dispatcher.
 func (h *Handler) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	h.handleRequest(w, r)
 }
 
-// handleRequest routes table requests
+// handleRequest routes table requests.
 func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
@@ -49,6 +57,9 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "InvalidUri", "Invalid path")
 		return
 	}
+
+	accountSegment := parts[0] // reserved for account, not currently used
+	_ = accountSegment
 
 	// Tables endpoint: /{account}/Tables
 	if parts[1] == "Tables" {
@@ -79,11 +90,10 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	table := parts[1]
+	tableSegment := parts[1]
 
 	// Entity with keys: /{account}/{table}(PartitionKey='pk',RowKey='rk')
-	entityPattern := regexp.MustCompile(`^([^(]+)\(PartitionKey='([^']+)',RowKey='([^']+)'\)$`)
-	if matches := entityPattern.FindStringSubmatch(table); len(matches) == 4 {
+	if matches := entityPathRe.FindStringSubmatch(tableSegment); len(matches) == 4 {
 		tableName := matches[1]
 		pk := matches[2]
 		rk := matches[3]
@@ -104,22 +114,22 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query entities: /{account}/{table}() or GET /{account}/{table}
-	tableName := strings.TrimSuffix(table, "()")
-	if r.Method == http.MethodGet {
+	tableName := strings.TrimSuffix(tableSegment, "()")
+	switch r.Method {
+	case http.MethodGet:
 		h.QueryEntities(w, r, tableName)
 		return
-	}
-
-	// Insert entity: POST /{account}/{table}
-	if r.Method == http.MethodPost {
+	case http.MethodPost:
+		// Insert entity: POST /{account}/{table}
 		h.InsertEntity(w, r, tableName)
 		return
+	default:
+		h.writeError(w, http.StatusBadRequest, "InvalidUri", "Invalid table operation")
+		return
 	}
-
-	h.writeError(w, http.StatusBadRequest, "InvalidUri", "Invalid table operation")
 }
 
-// writeError writes an Azure Storage error response
+// writeError writes an Azure Storage error response.
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
 	h.log.Warn("error response",
 		"statusCode", statusCode,
@@ -129,11 +139,12 @@ func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, m
 	common.WriteErrorResponse(w, statusCode, errorCode, message)
 }
 
-// ListTables lists all tables
+// ListTables lists all tables.
 func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	h.log.Debug("listing tables")
 
-	tables, err := h.store.ListTables(context.Background())
+	tables, err := h.store.ListTables(ctx)
 	if err != nil {
 		h.log.Error("failed to list tables", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
@@ -146,20 +157,20 @@ func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"value": tables,
 	}
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
-// CreateTable creates a new table
+// CreateTable creates a new table.
 func (h *Handler) CreateTable(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	var req struct {
 		TableName string `json:"TableName"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid request body")
 		return
 	}
-
 	if req.TableName == "" {
 		h.writeError(w, http.StatusBadRequest, "InvalidInput", "TableName required")
 		return
@@ -167,8 +178,7 @@ func (h *Handler) CreateTable(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Info("creating table", "table", req.TableName)
 
-	err := h.store.CreateTable(context.Background(), req.TableName)
-	if err != nil {
+	if err := h.store.CreateTable(ctx, req.TableName); err != nil {
 		if err == ErrTableExists {
 			h.log.Debug("table already exists", "table", req.TableName)
 			h.writeError(w, http.StatusConflict, "TableAlreadyExists", "Table already exists")
@@ -183,12 +193,12 @@ func (h *Handler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"TableName": req.TableName,
 	})
 }
 
-// DeleteTable deletes a table
+// DeleteTable deletes a table.
 func (h *Handler) DeleteTable(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
@@ -197,18 +207,17 @@ func (h *Handler) DeleteTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	re := regexp.MustCompile(`Tables\('([^']+)'\)`)
-	matches := re.FindStringSubmatch(parts[1])
+	matches := deleteTableRe.FindStringSubmatch(parts[1])
 	if len(matches) < 2 {
 		h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid table name")
 		return
 	}
 	tableName := matches[1]
 
+	ctx := r.Context()
 	h.log.Info("deleting table", "table", tableName)
 
-	err := h.store.DeleteTable(context.Background(), tableName)
-	if err != nil {
+	if err := h.store.DeleteTable(ctx, tableName); err != nil {
 		if err == ErrTableNotFound {
 			h.log.Debug("table not found", "table", tableName)
 			h.writeError(w, http.StatusNotFound, "TableNotFound", "The specified table does not exist")
@@ -224,17 +233,18 @@ func (h *Handler) DeleteTable(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// GetEntity retrieves a single entity
+// GetEntity retrieves a single entity.
 func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, pk, rk string) {
+	ctx := r.Context()
 	h.log.Debug("getting entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
-	table, err := h.store.GetTable(context.Background(), tableName)
+	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
 		return
 	}
 
-	entity, err := table.GetEntity(context.Background(), pk, rk)
+	entity, err := table.GetEntity(ctx, pk, rk)
 	if err != nil {
 		if err == ErrEntityNotFound {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
@@ -247,12 +257,14 @@ func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, p
 
 	common.SetResponseHeaders(w, entity.ETag)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entity)
+	_ = json.NewEncoder(w).Encode(entity)
 }
 
-// InsertEntity inserts a new entity
+// InsertEntity inserts a new entity.
 func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName string) {
-	table, err := h.store.GetTable(context.Background(), tableName)
+	ctx := r.Context()
+
+	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
 		return
@@ -266,7 +278,6 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 
 	pk, okPK := data["PartitionKey"].(string)
 	rk, okRK := data["RowKey"].(string)
-
 	if !okPK || !okRK {
 		h.writeError(w, http.StatusBadRequest, "InvalidInput", "PartitionKey and RowKey required")
 		return
@@ -274,7 +285,7 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 
 	h.log.Info("inserting entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
-	entity, err := table.InsertEntity(context.Background(), pk, rk, data)
+	entity, err := table.InsertEntity(ctx, pk, rk, data)
 	if err != nil {
 		if err == ErrEntityExists {
 			h.log.Debug("entity already exists", "table", tableName, "partitionKey", pk, "rowKey", rk)
@@ -290,14 +301,15 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 	common.SetResponseHeaders(w, entity.ETag)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(entity)
+	_ = json.NewEncoder(w).Encode(entity)
 }
 
-// UpdateEntity replaces an entity (PUT) - also supports upsert
+// UpdateEntity replaces an entity (PUT) - also supports upsert for Azure SDK compatibility.
 func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName, pk, rk string) {
+	ctx := r.Context()
 	h.log.Info("updating entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
-	table, err := h.store.GetTable(context.Background(), tableName)
+	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
 		return
@@ -309,40 +321,43 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		return
 	}
 
-	// Get If-Match header for ETag validation
 	ifMatch := r.Header.Get("If-Match")
 
 	var entity *Entity
 
-	// Check if entity exists
-	_, getErr := table.GetEntity(context.Background(), pk, rk)
-	if getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*") {
-		// Entity doesn't exist and no specific ETag required - upsert (insert)
-		entity, err = table.InsertEntity(context.Background(), pk, rk, data)
+	existing, getErr := table.GetEntity(ctx, pk, rk)
+	switch {
+	case getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*"):
+		// Upsert: insert when not found and no specific ETag required.
+		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
 			h.log.Error("failed to insert entity for upsert", "table", tableName, "error", err)
 			h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 			return
 		}
 		h.log.Info("entity upserted (inserted)", "table", tableName, "partitionKey", pk, "rowKey", rk)
-	} else if getErr == ErrEntityNotFound {
-		// Entity doesn't exist but specific ETag required - fail
+
+	case getErr == ErrEntityNotFound:
+		// Entity doesn't exist but specific ETag is required.
 		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
 		return
-	} else if getErr != nil {
+
+	case getErr != nil:
 		h.log.Error("failed to get entity", "table", tableName, "error", getErr)
 		h.writeError(w, http.StatusInternalServerError, "InternalServerError", getErr.Error())
 		return
-	} else {
-		// Entity exists - update it
-		entity, err = table.UpdateEntityWithETag(context.Background(), pk, rk, data, false, ifMatch)
+
+	default:
+		_ = existing // we only needed to know that it exists
+		entity, err = table.UpdateEntityWithETag(ctx, pk, rk, data, false, ifMatch)
 		if err != nil {
 			if err == ErrEntityNotFound {
 				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
 				return
 			}
 			if err == ErrPreconditionFailed {
-				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied", "The update condition specified in the request was not satisfied")
+				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
+					"The update condition specified in the request was not satisfied")
 				return
 			}
 			h.log.Error("failed to update entity", "table", tableName, "error", err)
@@ -356,11 +371,12 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// MergeEntity merges an entity (MERGE/PATCH) - also supports upsert
+// MergeEntity merges an entity (MERGE/PATCH) - also supports upsert.
 func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName, pk, rk string) {
+	ctx := r.Context()
 	h.log.Info("merging entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
-	table, err := h.store.GetTable(context.Background(), tableName)
+	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
 		return
@@ -372,16 +388,14 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 		return
 	}
 
-	// Get If-Match header for ETag validation
 	ifMatch := r.Header.Get("If-Match")
 
 	var entity *Entity
 	if ifMatch == "" || ifMatch == "*" {
-		// No ETag or wildcard - do upsert (insert or merge)
-		entity, err = table.UpsertEntity(context.Background(), pk, rk, data, true)
+		// Upsert merge semantics.
+		entity, err = table.UpsertEntity(ctx, pk, rk, data, true)
 	} else {
-		// ETag specified - must match existing entity
-		entity, err = table.UpdateEntityWithETag(context.Background(), pk, rk, data, true, ifMatch)
+		entity, err = table.UpdateEntityWithETag(ctx, pk, rk, data, true, ifMatch)
 	}
 
 	if err != nil {
@@ -390,7 +404,8 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 			return
 		}
 		if err == ErrPreconditionFailed {
-			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied", "The update condition specified in the request was not satisfied")
+			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
+				"The update condition specified in the request was not satisfied")
 			return
 		}
 		h.log.Error("failed to merge entity", "table", tableName, "error", err)
@@ -403,18 +418,18 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// DeleteEntity deletes an entity
+// DeleteEntity deletes an entity.
 func (h *Handler) DeleteEntity(w http.ResponseWriter, r *http.Request, tableName, pk, rk string) {
+	ctx := r.Context()
 	h.log.Info("deleting entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
-	table, err := h.store.GetTable(context.Background(), tableName)
+	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
 		return
 	}
 
-	err = table.DeleteEntity(context.Background(), pk, rk)
-	if err != nil {
+	if err := table.DeleteEntity(ctx, pk, rk); err != nil {
 		if err == ErrEntityNotFound {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
 			return
@@ -429,17 +444,26 @@ func (h *Handler) DeleteEntity(w http.ResponseWriter, r *http.Request, tableName
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// QueryEntities queries entities with filter and select
+// QueryEntities queries entities with filter and select.
 func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableName string) {
+	ctx := r.Context()
+
 	filter := r.URL.Query().Get("$filter")
 	selectStr := r.URL.Query().Get("$select")
 	top := r.URL.Query().Get("$top")
 	nextPK := r.URL.Query().Get("NextPartitionKey")
 	nextRK := r.URL.Query().Get("NextRowKey")
 
-	h.log.Debug("querying entities", "table", tableName, "filter", filter, "select", selectStr, "top", top, "nextPK", nextPK, "nextRK", nextRK)
+	h.log.Debug("querying entities",
+		"table", tableName,
+		"filter", filter,
+		"select", selectStr,
+		"top", top,
+		"nextPK", nextPK,
+		"nextRK", nextRK,
+	)
 
-	table, err := h.store.GetTable(context.Background(), tableName)
+	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
 		return
@@ -452,30 +476,39 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 
 	var limit int
 	if top != "" {
-		fmt.Sscanf(top, "%d", &limit)
+		if n, err := strconv.Atoi(top); err == nil && n > 0 {
+			limit = n
+		}
 	}
 
-	entities, contPK, contRK, err := table.QueryEntities(context.Background(), filter, limit, selectFields, nextPK, nextRK)
+	entities, contPK, contRK, err := table.QueryEntities(ctx, filter, limit, selectFields, nextPK, nextRK)
 	if err != nil {
+		if errors.Is(err, ErrInvalidFilter) {
+			h.log.Warn("invalid $filter", "table", tableName, "filter", filter, "error", err)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Unsupported or invalid $filter expression")
+			return
+		}
 		h.log.Error("failed to query entities", "table", tableName, "error", err)
-		h.writeError(w, http.StatusBadRequest, "InvalidInput", err.Error())
+		h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 		return
 	}
 
-	h.log.Debug("entities queried", "table", tableName, "count", len(entities), "hasMore", contPK != "")
+	h.log.Debug("entities queried",
+		"table", tableName,
+		"count", len(entities),
+		"hasMore", contPK != "",
+	)
+
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/json")
 
-	// Set continuation tokens if there are more results
 	if contPK != "" {
 		w.Header().Set("x-ms-continuation-NextPartitionKey", contPK)
 		w.Header().Set("x-ms-continuation-NextRowKey", contRK)
 	}
 
-	// Apply $select projection if specified
 	var responseEntities []map[string]interface{}
 	for _, entity := range entities {
-		// Convert entity to map
 		entityMap := map[string]interface{}{
 			"PartitionKey": entity.PartitionKey,
 			"RowKey":       entity.RowKey,
@@ -486,7 +519,6 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 			entityMap[k] = v
 		}
 
-		// Apply $select if specified (always include PK, RK, Timestamp, ETag)
 		if len(selectFields) > 0 {
 			projected := map[string]interface{}{
 				"PartitionKey": entity.PartitionKey,
@@ -508,19 +540,24 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 	response := map[string]interface{}{
 		"value": responseEntities,
 	}
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func parseSelect(selectStr string) []string {
 	fields := strings.Split(selectStr, ",")
-	for i, f := range fields {
-		fields[i] = strings.TrimSpace(f)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			out = append(out, f)
+		}
 	}
-	return fields
+	return out
 }
 
-// HandleBatchOperation handles batch operations
+// HandleBatchOperation handles batch operations.
 func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	h.log.Info("handling batch operation")
 
 	batchReq, err := ParseBatchRequest(r)
@@ -532,34 +569,34 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Debug("batch request parsed", "operations", len(batchReq.Operations))
 
-	// Validate that all operations target the same partition
 	if err := ValidateBatchRequest(batchReq); err != nil {
 		h.log.Error("batch validation failed", "error", err)
 		h.writeBatchError(w, http.StatusBadRequest, "CommandsInBatchActOnDifferentPartitions", err.Error())
 		return
 	}
 
-	// Execute the batch operations atomically
-	responses, failedIndex, err := h.executeBatch(batchReq)
+	responses, failedIndex, err := h.executeBatch(ctx, batchReq)
 	if err != nil {
 		h.log.Error("batch execution failed", "error", err, "failedIndex", failedIndex)
 		h.writeBatchErrorWithIndex(w, failedIndex, err)
 		return
 	}
 
-	// Generate boundaries matching Azure format exactly
 	batchBoundary := fmt.Sprintf("batchresponse_%s", generateUUID())
 	changesetBoundary := fmt.Sprintf("changesetresponse_%s", generateUUID())
 
-	// Build the changeset using multipart.Writer
+	// Build the changeset using multipart.Writer.
 	changesetBuf := new(bytes.Buffer)
 	changesetWriter := multipart.NewWriter(changesetBuf)
-	changesetWriter.SetBoundary(changesetBoundary)
+	if err := changesetWriter.SetBoundary(changesetBoundary); err != nil {
+		h.log.Error("failed to set changeset boundary", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	for i, resp := range responses {
 		h.log.Debug("writing batch response", "index", i, "status", resp.StatusCode)
 
-		// Create headers for this part
 		partHeaders := make(textproto.MIMEHeader)
 		partHeaders.Set("Content-Type", "application/http")
 		partHeaders.Set("Content-Transfer-Encoding", "binary")
@@ -570,7 +607,6 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Write the HTTP response for this operation
 		var httpResp strings.Builder
 		httpResp.WriteString(fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode)))
 		httpResp.WriteString(fmt.Sprintf("Content-ID: %d\r\n", i+1))
@@ -579,16 +615,25 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 		httpResp.WriteString("DataServiceVersion: 3.0;\r\n")
 		httpResp.WriteString("\r\n")
 
-		partWriter.Write([]byte(httpResp.String()))
+		if _, err := partWriter.Write([]byte(httpResp.String())); err != nil {
+			h.log.Error("failed to write batch part", "error", err)
+		}
 	}
-	changesetWriter.Close()
+	if err := changesetWriter.Close(); err != nil {
+		h.log.Error("failed to close changeset writer", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
-	// Build the outer batch response using multipart.Writer
+	// Build the outer batch response.
 	batchBuf := new(bytes.Buffer)
 	batchWriter := multipart.NewWriter(batchBuf)
-	batchWriter.SetBoundary(batchBoundary)
+	if err := batchWriter.SetBoundary(batchBoundary); err != nil {
+		h.log.Error("failed to set batch boundary", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
-	// Create the changeset part
 	batchPartHeaders := make(textproto.MIMEHeader)
 	batchPartHeaders.Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", changesetBoundary))
 
@@ -598,37 +643,40 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	batchPart.Write(changesetBuf.Bytes())
-	batchWriter.Close()
+	if _, err := batchPart.Write(changesetBuf.Bytes()); err != nil {
+		h.log.Error("failed to write batch changeset", "error", err)
+	}
+	if err := batchWriter.Close(); err != nil {
+		h.log.Error("failed to close batch writer", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	w.Header().Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", batchBoundary))
 	w.WriteHeader(http.StatusAccepted)
-	w.Write(batchBuf.Bytes())
+	_, _ = w.Write(batchBuf.Bytes())
 }
 
-// generateUUID generates a proper UUID v4 string for batch boundaries
+// generateUUID generates a v4 UUID string for batch boundaries.
 func generateUUID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
-	// Set version (4) and variant bits
+	_, _ = rand.Read(b)
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// executeBatch executes batch operations atomically
-// Returns the responses, the index of the failed operation (if any), and an error
-func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse, int, error) {
-	ctx := context.Background()
+// executeBatch executes batch operations atomically at the emulator level.
+// (Note: without real transactions, this is best-effort "all-or-first-failure".)
+func (h *Handler) executeBatch(ctx context.Context, batchReq *BatchRequest) ([]BatchOperationResponse, int, error) {
 	responses := make([]BatchOperationResponse, len(batchReq.Operations))
 
-	// Get the table
 	table, err := h.store.GetTable(ctx, batchReq.TableName)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// First pass: validate all operations will succeed
+	// First pass: validate operations.
 	for i, op := range batchReq.Operations {
 		pk := op.PartitionKey
 		rk := op.RowKey
@@ -637,25 +685,17 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 
 		switch op.Method {
 		case http.MethodPost:
-			// Insert - check entity doesn't exist
-			_, err := table.GetEntity(ctx, pk, rk)
-			if err == nil {
-				// Entity already exists - conflict
+			// Insert must fail if entity exists.
+			if _, err := table.GetEntity(ctx, pk, rk); err == nil {
 				return nil, i, ErrEntityExists
 			}
 		case http.MethodPut:
-			// Update/Replace - in Azure, PUT requires entity to exist
-			// However, for compatibility with many clients that expect upsert,
-			// we treat PUT as upsert (insert or replace)
-			h.log.Debug("treating PUT as upsert for compatibility", "index", i, "method", op.Method)
+			// PUT: we treat as upsert for Azure SDK compatibility; no validation needed here.
+			h.log.Debug("treating PUT as upsert for compatibility", "index", i)
 		case "PATCH", "MERGE":
-			// Merge/Upsert - entity may or may not exist, no validation needed
-			// Azure Tables upsert creates if not exists
-			h.log.Debug("skipping validation for upsert operation", "index", i, "method", op.Method)
+			// MERGE/PATCH: upsert semantics, no existence validation required.
 		case http.MethodDelete:
-			// Delete - check entity exists
-			_, err := table.GetEntity(ctx, pk, rk)
-			if err == ErrEntityNotFound {
+			if _, err := table.GetEntity(ctx, pk, rk); err == ErrEntityNotFound {
 				return nil, i, ErrEntityNotFound
 			}
 		default:
@@ -663,8 +703,14 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 		}
 	}
 
-	// Second pass: execute all operations
+	// Second pass: execute operations.
 	for i, op := range batchReq.Operations {
+		select {
+		case <-ctx.Done():
+			return nil, i, ctx.Err()
+		default:
+		}
+
 		pk := op.PartitionKey
 		rk := op.RowKey
 		props := op.EntityData
@@ -673,62 +719,47 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 
 		switch op.Method {
 		case http.MethodPost:
-			// Insert
-			_, err := table.InsertEntity(ctx, pk, rk, props)
-			if err != nil {
+			if _, err := table.InsertEntity(ctx, pk, rk, props); err != nil {
 				return nil, i, err
 			}
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case http.MethodPut:
-			// Replace/Upsert - for compatibility, insert if not exists, replace if exists
-			_, err := table.GetEntity(ctx, pk, rk)
-			if err == ErrEntityNotFound {
-				// Entity doesn't exist - insert it
-				_, err = table.InsertEntity(ctx, pk, rk, props)
-				if err != nil {
+			if _, err := table.GetEntity(ctx, pk, rk); err == ErrEntityNotFound {
+				if _, err := table.InsertEntity(ctx, pk, rk, props); err != nil {
 					return nil, i, err
 				}
 			} else if err != nil {
 				return nil, i, err
 			} else {
-				// Entity exists - replace it
-				_, err = table.UpdateEntity(ctx, pk, rk, props, false)
-				if err != nil {
+				if _, err := table.UpdateEntity(ctx, pk, rk, props, false); err != nil {
 					return nil, i, err
 				}
 			}
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case "PATCH", "MERGE":
-			// Merge/Upsert - insert if not exists, merge if exists
-			_, err := table.GetEntity(ctx, pk, rk)
-			if err == ErrEntityNotFound {
-				// Entity doesn't exist - insert it
-				_, err = table.InsertEntity(ctx, pk, rk, props)
-				if err != nil {
+			if _, err := table.GetEntity(ctx, pk, rk); err == ErrEntityNotFound {
+				if _, err := table.InsertEntity(ctx, pk, rk, props); err != nil {
 					return nil, i, err
 				}
 			} else if err != nil {
 				return nil, i, err
 			} else {
-				// Entity exists - merge it
-				_, err = table.UpdateEntity(ctx, pk, rk, props, true)
-				if err != nil {
+				if _, err := table.UpdateEntity(ctx, pk, rk, props, true); err != nil {
 					return nil, i, err
 				}
 			}
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case http.MethodDelete:
-			// Delete
-			err := table.DeleteEntity(ctx, pk, rk)
-			if err != nil {
+			if err := table.DeleteEntity(ctx, pk, rk); err != nil {
 				return nil, i, err
 			}
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		default:
+			// Unknown verbs still get a 204 inside the batch, to keep batch structurally valid.
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 		}
 	}
@@ -736,15 +767,14 @@ func (h *Handler) executeBatch(batchReq *BatchRequest) ([]BatchOperationResponse
 	return responses, -1, nil
 }
 
-// writeBatchError writes a batch error response
+// writeBatchError writes a batch error response.
 func (h *Handler) writeBatchError(w http.ResponseWriter, statusCode int, code, message string) {
 	batchBoundary := fmt.Sprintf("batchresponse_%s", generateUUID())
 	changesetBoundary := fmt.Sprintf("changesetresponse_%s", generateUUID())
 
-	// Build error response in changeset
 	changesetBuf := new(bytes.Buffer)
 	changesetWriter := multipart.NewWriter(changesetBuf)
-	changesetWriter.SetBoundary(changesetBoundary)
+	_ = changesetWriter.SetBoundary(changesetBoundary)
 
 	partHeaders := make(textproto.MIMEHeader)
 	partHeaders.Set("Content-Type", "application/http")
@@ -761,27 +791,26 @@ func (h *Handler) writeBatchError(w http.ResponseWriter, statusCode int, code, m
 	httpResp.WriteString("\r\n")
 	httpResp.WriteString(errorBody)
 
-	partWriter.Write([]byte(httpResp.String()))
-	changesetWriter.Close()
+	_, _ = partWriter.Write([]byte(httpResp.String()))
+	_ = changesetWriter.Close()
 
-	// Build outer batch response
 	batchBuf := new(bytes.Buffer)
 	batchWriter := multipart.NewWriter(batchBuf)
-	batchWriter.SetBoundary(batchBoundary)
+	_ = batchWriter.SetBoundary(batchBoundary)
 
 	batchPartHeaders := make(textproto.MIMEHeader)
 	batchPartHeaders.Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", changesetBoundary))
 
 	batchPart, _ := batchWriter.CreatePart(batchPartHeaders)
-	batchPart.Write(changesetBuf.Bytes())
-	batchWriter.Close()
+	_, _ = batchPart.Write(changesetBuf.Bytes())
+	_ = batchWriter.Close()
 
 	w.Header().Set("Content-Type", fmt.Sprintf("multipart/mixed; boundary=%s", batchBoundary))
 	w.WriteHeader(http.StatusAccepted)
-	w.Write(batchBuf.Bytes())
+	_, _ = w.Write(batchBuf.Bytes())
 }
 
-// writeBatchErrorWithIndex writes a batch error response for a specific operation
+// writeBatchErrorWithIndex writes a batch error response for a specific operation.
 func (h *Handler) writeBatchErrorWithIndex(w http.ResponseWriter, index int, err error) {
 	code := "InvalidInput"
 	statusCode := http.StatusBadRequest

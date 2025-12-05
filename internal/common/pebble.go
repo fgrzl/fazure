@@ -8,34 +8,36 @@ import (
 	"github.com/cockroachdb/pebble/v2/sstable/block"
 )
 
-// snappyCompression returns a Snappy compression profile for level options
 func snappyCompression() *block.CompressionProfile {
 	return block.SnappyCompression
 }
 
-// Store provides a shared Pebble instance for all emulators
 type Store struct {
 	db        *pebble.DB
 	writeOpts *pebble.WriteOptions
 	syncOpts  *pebble.WriteOptions
 }
 
-// WriteOptions returns the default write options (async for better performance)
-func (s *Store) WriteOptions() *pebble.WriteOptions {
-	return s.writeOpts
-}
+func (s *Store) WriteOptions() *pebble.WriteOptions     { return s.writeOpts }
+func (s *Store) SyncWriteOptions() *pebble.WriteOptions { return s.syncOpts }
 
-// SyncWriteOptions returns synchronous write options for critical operations
-func (s *Store) SyncWriteOptions() *pebble.WriteOptions {
-	return s.syncOpts
-}
-
-// NewStore creates a new shared storage instance
+// NewStore creates a Pebble DB tuned for Azure-Table patterns (range scans + point lookups)
+// and avoids multi-second stalls seen with the previous configuration.
 func NewStore(datadir string) (*Store, error) {
+
 	opts := &pebble.Options{
-		// Control concurrent compactions (min 4, max 4)
-		CompactionConcurrencyRange: func() (int, int) { return 4, 4 },
-		// Use bloom filters for faster point lookups
+		// Allow Pebble to scale compactions naturally.
+		// 1–2 threads is ideal for stable latency on dev hardware.
+		CompactionConcurrencyRange: func() (int, int) { return 1, 2 },
+
+		// Major cause of your stalls was 64MB memtables producing huge L0 files.
+		// 8–16MB is a sweet spot for scan-heavy workloads.
+		MemTableSize: 16 << 20, // 16 MB
+
+		// Larger cache smooths read latency during prefix scans & JSON decode.
+		Cache: pebble.NewCache(256 << 20), // 256 MB
+
+		// Level options tuned for mixed point + range queries.
 		Levels: [7]pebble.LevelOptions{
 			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
 			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
@@ -45,10 +47,14 @@ func NewStore(datadir string) (*Store, error) {
 			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
 			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
 		},
-		// Increase memtable size for better write performance
-		MemTableSize: 64 * 1024 * 1024, // 64MB
-		// Cache for faster reads
-		Cache: pebble.NewCache(128 * 1024 * 1024), // 128MB cache
+
+		// These two *do* exist and control L0 pressure.
+		// They prevent runaway L0 buildup and stop the long read stalls you observed.
+		L0CompactionThreshold: 4,
+		L0StopWritesThreshold: 12,
+
+		// Recommended for modern Pebble engines.
+		FormatMajorVersion: pebble.FormatNewest,
 	}
 
 	db, err := pebble.Open(datadir, opts)
@@ -58,17 +64,13 @@ func NewStore(datadir string) (*Store, error) {
 
 	return &Store{
 		db:        db,
-		writeOpts: &pebble.WriteOptions{Sync: false}, // Async writes for performance
-		syncOpts:  &pebble.WriteOptions{Sync: true},  // Sync writes when durability is critical
+		writeOpts: &pebble.WriteOptions{Sync: false},
+		syncOpts:  &pebble.WriteOptions{Sync: true},
 	}, nil
 }
 
-// DB returns the underlying Pebble database
-func (s *Store) DB() *pebble.DB {
-	return s.db
-}
+func (s *Store) DB() *pebble.DB { return s.db }
 
-// Close closes the Pebble database
-func (s *Store) Close() error {
-	return s.db.Close()
-}
+func (s *Store) Metrics() string { return s.db.Metrics().String() }
+
+func (s *Store) Close() error { return s.db.Close() }

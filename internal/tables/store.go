@@ -1,16 +1,21 @@
-﻿package tables
+package tables
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/fgrzl/fazure/internal/common"
 )
 
-// Entity represents a table entity with metadata
+// ───────────────────────────────────────────────────────────────────────────────
+// Entity model
+// ───────────────────────────────────────────────────────────────────────────────
+
+// Entity represents a table entity with metadata.
 type Entity struct {
 	PartitionKey string                 `json:"PartitionKey"`
 	RowKey       string                 `json:"RowKey"`
@@ -19,7 +24,7 @@ type Entity struct {
 	Properties   map[string]interface{} `json:"-"`
 }
 
-// MarshalJSON implements custom JSON marshaling
+// MarshalJSON implements custom JSON marshaling (Azure-style flat object).
 func (e *Entity) MarshalJSON() ([]byte, error) {
 	m := map[string]interface{}{
 		"PartitionKey": e.PartitionKey,
@@ -28,7 +33,6 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 		"ETag":         e.ETag,
 	}
 
-	// Merge properties
 	for k, v := range e.Properties {
 		m[k] = v
 	}
@@ -36,7 +40,7 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// UnmarshalJSON implements custom JSON unmarshaling
+// UnmarshalJSON implements custom JSON unmarshaling.
 func (e *Entity) UnmarshalJSON(data []byte) error {
 	var m map[string]interface{}
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -52,14 +56,11 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	if etag, ok := m["ETag"].(string); ok {
 		e.ETag = etag
 	}
-
-	// Parse timestamp if it's a Unix timestamp
 	if ts, ok := m["Timestamp"].(float64); ok {
 		e.Timestamp = time.Unix(int64(ts), 0).UTC()
 	}
 
-	// Store remaining properties
-	e.Properties = make(map[string]interface{})
+	e.Properties = make(map[string]interface{}, len(m))
 	for k, v := range m {
 		if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "ETag" {
 			e.Properties[k] = v
@@ -69,33 +70,117 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// TableStore manages tables and entities
+// ───────────────────────────────────────────────────────────────────────────────
+// Pebble key encoding
+// Layout: tables/data/<table>\x00<partitionKey>\x00<rowKey>
+// This preserves table, PK, RK ordering and works well with prefix/range scans.
+// ───────────────────────────────────────────────────────────────────────────────
+
+const (
+	metaPrefix      = "tables/meta/"
+	dataPrefix      = "tables/data/"
+	keySep     byte = 0x00
+)
+
+// metaKey(tableName) => tables/meta/<table>
+func metaKey(tableName string) []byte {
+	return []byte(metaPrefix + tableName)
+}
+
+// dataKey(table, pk, rk) => tables/data/<table>\x00<pk>\x00<rk>
+func dataKey(table, pk, rk string) []byte {
+	n := len(dataPrefix) + len(table) + 1 + len(pk) + 1 + len(rk)
+	b := make([]byte, 0, n)
+	b = append(b, dataPrefix...)
+	b = append(b, table...)
+	b = append(b, keySep)
+	b = append(b, pk...)
+	b = append(b, keySep)
+	b = append(b, rk...)
+	return b
+}
+
+// tablePrefix(table) => prefix for all entities in a table
+// tables/data/<table>\x00
+func tablePrefix(table string) []byte {
+	n := len(dataPrefix) + len(table) + 1
+	b := make([]byte, 0, n)
+	b = append(b, dataPrefix...)
+	b = append(b, table...)
+	b = append(b, keySep)
+	return b
+}
+
+// partitionPrefix(table, pk) => prefix for all entities in a partition
+// tables/data/<table>\x00<pk>\x00
+func partitionPrefix(table, pk string) []byte {
+	n := len(dataPrefix) + len(table) + 1 + len(pk) + 1
+	b := make([]byte, 0, n)
+	b = append(b, dataPrefix...)
+	b = append(b, table...)
+	b = append(b, keySep)
+	b = append(b, pk...)
+	b = append(b, keySep)
+	return b
+}
+
+// upperBoundForPrefix returns an upper bound suitable for Pebble range scans.
+func upperBoundForPrefix(prefix []byte) []byte {
+	upper := make([]byte, len(prefix)+1)
+	copy(upper, prefix)
+	upper[len(prefix)] = 0xff
+	return upper
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// TableStore
+// ───────────────────────────────────────────────────────────────────────────────
+
+// TableStore manages tables and entities.
 type TableStore struct {
-	store *common.Store
+	store   *common.Store
+	log     *slog.Logger
+	metrics *Metrics
 }
 
-// NewTableStore creates a new table store
-func NewTableStore(store *common.Store) (*TableStore, error) {
-	return &TableStore{store: store}, nil
+// NewTableStore creates a new table store.
+func NewTableStore(store *common.Store, logger *slog.Logger, metrics *Metrics) (*TableStore, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &TableStore{
+		store:   store,
+		log:     logger.With("component", "tables-store"),
+		metrics: metrics,
+	}, nil
 }
 
-// ListTables returns all table names
+// ListTables returns all table names.
 func (ts *TableStore) ListTables(ctx context.Context) ([]map[string]string, error) {
 	db := ts.store.DB()
-	prefix := []byte("tables/meta/")
+	prefix := []byte(metaPrefix)
+	upper := upperBoundForPrefix(prefix)
 
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
-		UpperBound: append(prefix, 0xff),
+		UpperBound: upper,
 	})
 	if err != nil {
 		return nil, err
 	}
 	defer iter.Close()
 
-	tables := make([]map[string]string, 0)
-	for iter.First(); iter.Valid(); iter.Next() {
-		tableName := string(iter.Key()[len(prefix):])
+	var tables []map[string]string
+	for ok := iter.First(); ok; ok = iter.Next() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		key := iter.Key()
+		tableName := string(key[len(prefix):])
 		tables = append(tables, map[string]string{
 			"TableName": tableName,
 		})
@@ -104,38 +189,38 @@ func (ts *TableStore) ListTables(ctx context.Context) ([]map[string]string, erro
 	return tables, iter.Error()
 }
 
-// CreateTable creates a new table
+// CreateTable creates a new table.
 func (ts *TableStore) CreateTable(ctx context.Context, tableName string) error {
 	db := ts.store.DB()
-	key := []byte("tables/meta/" + tableName)
+	key := metaKey(tableName)
 
-	// Check if table exists
 	_, closer, err := db.Get(key)
 	if err == nil {
 		closer.Close()
 		return ErrTableExists
 	}
-	if err != pebble.ErrNotFound {
+	if err != nil && err != pebble.ErrNotFound {
 		return err
 	}
 
-	// Create table metadata
 	metadata := map[string]interface{}{
 		"name":      tableName,
 		"createdAt": time.Now().UTC(),
 	}
-	data, _ := json.Marshal(metadata)
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
 
 	return db.Set(key, data, pebble.NoSync)
 }
 
-// DeleteTable deletes a table and all its entities
+// DeleteTable deletes a table and all its entities.
 func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	db := ts.store.DB()
-	metaKey := []byte("tables/meta/" + tableName)
+	mKey := metaKey(tableName)
 
-	// Check if table exists
-	_, closer, err := db.Get(metaKey)
+	_, closer, err := db.Get(mKey)
 	if err == pebble.ErrNotFound {
 		return ErrTableNotFound
 	}
@@ -144,16 +229,16 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	}
 	closer.Close()
 
-	// Delete table metadata
-	if err := db.Delete(metaKey, pebble.NoSync); err != nil {
+	if err := db.Delete(mKey, pebble.NoSync); err != nil {
 		return err
 	}
 
-	// Delete all entities
-	prefix := []byte(fmt.Sprintf("tables/data/%s/", tableName))
+	prefix := tablePrefix(tableName)
+	upper := upperBoundForPrefix(prefix)
+
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
-		UpperBound: append(prefix, 0xff),
+		UpperBound: upper,
 	})
 	if err != nil {
 		return err
@@ -161,20 +246,45 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	defer iter.Close()
 
 	batch := db.NewBatch()
-	for iter.First(); iter.Valid(); iter.Next() {
-		batch.Delete(iter.Key(), nil)
+	for ok := iter.First(); ok; ok = iter.Next() {
+		select {
+		case <-ctx.Done():
+			_ = batch.Close()
+			return ctx.Err()
+		default:
+		}
+		if err := batch.Delete(iter.Key(), nil); err != nil {
+			_ = batch.Close()
+			return err
+		}
+	}
+
+	if err := iter.Error(); err != nil {
+		_ = batch.Close()
+		return err
 	}
 
 	return batch.Commit(pebble.NoSync)
 }
 
-// GetTable returns a table handle
+// ───────────────────────────────────────────────────────────────────────────────
+// Table
+// ───────────────────────────────────────────────────────────────────────────────
+
+// Table represents a table handle.
+type Table struct {
+	store   *common.Store
+	name    string
+	log     *slog.Logger
+	metrics *Metrics
+}
+
+// GetTable returns a table handle.
 func (ts *TableStore) GetTable(ctx context.Context, tableName string) (*Table, error) {
 	db := ts.store.DB()
-	metaKey := []byte("tables/meta/" + tableName)
+	key := metaKey(tableName)
 
-	// Check if table exists
-	_, closer, err := db.Get(metaKey)
+	_, closer, err := db.Get(key)
 	if err == pebble.ErrNotFound {
 		return nil, ErrTableNotFound
 	}
@@ -183,34 +293,33 @@ func (ts *TableStore) GetTable(ctx context.Context, tableName string) (*Table, e
 	}
 	closer.Close()
 
+	logger := ts.log
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	return &Table{
-		store: ts.store,
-		name:  tableName,
+		store:   ts.store,
+		name:    tableName,
+		log:     logger.With("table", tableName),
+		metrics: ts.metrics,
 	}, nil
 }
 
-// Table represents a table handle
-type Table struct {
-	store *common.Store
-	name  string
-}
-
-// InsertEntity inserts a new entity
+// InsertEntity inserts a new entity (fails if exists).
 func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}) (*Entity, error) {
 	db := t.store.DB()
-	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
+	key := dataKey(t.name, partitionKey, rowKey)
 
-	// Check if entity exists
 	_, closer, err := db.Get(key)
 	if err == nil {
 		closer.Close()
 		return nil, ErrEntityExists
 	}
-	if err != pebble.ErrNotFound {
+	if err != nil && err != pebble.ErrNotFound {
 		return nil, err
 	}
 
-	// Create entity
 	entity := &Entity{
 		PartitionKey: partitionKey,
 		RowKey:       rowKey,
@@ -218,11 +327,12 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		Properties:   properties,
 	}
 
-	// Generate ETag
-	data, _ := json.Marshal(entity)
+	data, err := json.Marshal(entity)
+	if err != nil {
+		return nil, err
+	}
 	entity.ETag = common.GenerateETag(data)
 
-	// Marshal with ETag - use pointer to ensure custom MarshalJSON is called
 	data, err = json.Marshal(entity)
 	if err != nil {
 		return nil, err
@@ -235,10 +345,10 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 	return entity, nil
 }
 
-// GetEntity retrieves an entity
+// GetEntity retrieves an entity.
 func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*Entity, error) {
 	db := t.store.DB()
-	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
+	key := dataKey(t.name, partitionKey, rowKey)
 
 	data, closer, err := db.Get(key)
 	if err == pebble.ErrNotFound {
@@ -247,7 +357,7 @@ func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*En
 	if err != nil {
 		return nil, err
 	}
-	// Copy data before closing (Pebble reuses buffers)
+
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
 	closer.Close()
@@ -260,17 +370,27 @@ func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*En
 	return &entity, nil
 }
 
-// UpdateEntity updates an entity (merge if merge=true, replace if merge=false)
-func (t *Table) UpdateEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}, merge bool) (*Entity, error) {
+// UpdateEntity updates an entity (merge if merge=true, replace if merge=false).
+func (t *Table) UpdateEntity(
+	ctx context.Context,
+	partitionKey, rowKey string,
+	properties map[string]interface{},
+	merge bool,
+) (*Entity, error) {
 	return t.UpdateEntityWithETag(ctx, partitionKey, rowKey, properties, merge, "")
 }
 
-// UpdateEntityWithETag updates an entity with optional ETag validation
-func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}, merge bool, ifMatch string) (*Entity, error) {
+// UpdateEntityWithETag updates an entity with optional ETag validation.
+func (t *Table) UpdateEntityWithETag(
+	ctx context.Context,
+	partitionKey, rowKey string,
+	properties map[string]interface{},
+	merge bool,
+	ifMatch string,
+) (*Entity, error) {
 	db := t.store.DB()
-	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
+	key := dataKey(t.name, partitionKey, rowKey)
 
-	// Get existing entity
 	data, closer, err := db.Get(key)
 	if err == pebble.ErrNotFound {
 		return nil, ErrEntityNotFound
@@ -279,7 +399,6 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 		return nil, err
 	}
 
-	// Copy data before closing (Pebble reuses buffers)
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
 	closer.Close()
@@ -289,16 +408,11 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 		return nil, err
 	}
 
-	// Validate ETag if provided (and not wildcard)
-	if ifMatch != "" && ifMatch != "*" {
-		if entity.ETag != ifMatch {
-			return nil, ErrPreconditionFailed
-		}
+	if ifMatch != "" && ifMatch != "*" && entity.ETag != ifMatch {
+		return nil, ErrPreconditionFailed
 	}
 
-	// Update properties
 	if merge {
-		// Merge: add/update properties, keep existing ones
 		if entity.Properties == nil {
 			entity.Properties = make(map[string]interface{})
 		}
@@ -308,8 +422,7 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 			}
 		}
 	} else {
-		// Replace: replace all properties
-		entity.Properties = make(map[string]interface{})
+		entity.Properties = make(map[string]interface{}, len(properties))
 		for k, v := range properties {
 			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
 				entity.Properties[k] = v
@@ -317,12 +430,13 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 		}
 	}
 
-	// Update timestamp and ETag
 	entity.Timestamp = time.Now().UTC()
-	data, _ = json.Marshal(&entity)
+	data, err = json.Marshal(&entity)
+	if err != nil {
+		return nil, err
+	}
 	entity.ETag = common.GenerateETag(data)
 
-	// Marshal with new ETag - use pointer to ensure custom MarshalJSON is called
 	data, err = json.Marshal(&entity)
 	if err != nil {
 		return nil, err
@@ -335,22 +449,24 @@ func (t *Table) UpdateEntityWithETag(ctx context.Context, partitionKey, rowKey s
 	return &entity, nil
 }
 
-// UpsertEntity inserts or updates an entity
-func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}, merge bool) (*Entity, error) {
+// UpsertEntity inserts or updates an entity.
+func (t *Table) UpsertEntity(
+	ctx context.Context,
+	partitionKey, rowKey string,
+	properties map[string]interface{},
+	merge bool,
+) (*Entity, error) {
 	db := t.store.DB()
-	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
+	key := dataKey(t.name, partitionKey, rowKey)
 
-	// Try to get existing entity
 	data, closer, err := db.Get(key)
 	if err == pebble.ErrNotFound {
-		// Entity doesn't exist, insert new one
 		return t.InsertEntity(ctx, partitionKey, rowKey, properties)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy data before closing (Pebble reuses buffers)
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
 	closer.Close()
@@ -360,9 +476,7 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		return nil, err
 	}
 
-	// Update properties
 	if merge {
-		// Merge: add/update properties, keep existing ones
 		if entity.Properties == nil {
 			entity.Properties = make(map[string]interface{})
 		}
@@ -372,8 +486,7 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 			}
 		}
 	} else {
-		// Replace: replace all properties
-		entity.Properties = make(map[string]interface{})
+		entity.Properties = make(map[string]interface{}, len(properties))
 		for k, v := range properties {
 			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
 				entity.Properties[k] = v
@@ -381,12 +494,13 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		}
 	}
 
-	// Update timestamp and ETag
 	entity.Timestamp = time.Now().UTC()
-	marshaledData, _ := json.Marshal(&entity)
+	marshaledData, err := json.Marshal(&entity)
+	if err != nil {
+		return nil, err
+	}
 	entity.ETag = common.GenerateETag(marshaledData)
 
-	// Marshal with new ETag
 	finalData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
@@ -399,12 +513,11 @@ func (t *Table) UpsertEntity(ctx context.Context, partitionKey, rowKey string, p
 	return &entity, nil
 }
 
-// DeleteEntity deletes an entity
+// DeleteEntity deletes an entity.
 func (t *Table) DeleteEntity(ctx context.Context, partitionKey, rowKey string) error {
 	db := t.store.DB()
-	key := []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, partitionKey, rowKey))
+	key := dataKey(t.name, partitionKey, rowKey)
 
-	// Check if entity exists
 	_, closer, err := db.Get(key)
 	if err == pebble.ErrNotFound {
 		return ErrEntityNotFound
@@ -417,22 +530,29 @@ func (t *Table) DeleteEntity(ctx context.Context, partitionKey, rowKey string) e
 	return db.Delete(key, pebble.NoSync)
 }
 
-// ListEntities lists all entities in the table
+// ListEntities lists all entities in the table.
 func (t *Table) ListEntities(ctx context.Context) ([]*Entity, error) {
 	db := t.store.DB()
-	prefix := []byte(fmt.Sprintf("tables/data/%s/", t.name))
+	prefix := tablePrefix(t.name)
+	upper := upperBoundForPrefix(prefix)
 
 	iter, err := db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
-		UpperBound: append(prefix, 0xff),
+		UpperBound: upper,
 	})
 	if err != nil {
 		return nil, err
 	}
 	defer iter.Close()
 
-	entities := make([]*Entity, 0)
-	for iter.First(); iter.Valid(); iter.Next() {
+	var entities []*Entity
+	for ok := iter.First(); ok; ok = iter.Next() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		var entity Entity
 		if err := json.Unmarshal(iter.Value(), &entity); err != nil {
 			continue
@@ -443,69 +563,138 @@ func (t *Table) ListEntities(ctx context.Context) ([]*Entity, error) {
 	return entities, iter.Error()
 }
 
-// QueryEntities queries entities with filters and pagination
-func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selectFields []string, nextPK, nextRK string) ([]*Entity, string, string, error) {
+// QueryEntities queries entities with filters and pagination.
+//
+// - filter: OData-like filter string (we delegate to MatchesFilter).
+// - top: max number of results (0 => default 1000).
+// - selectFields: currently ignored here (projection is done in handler).
+// - nextPK/nextRK: continuation tokens (Azure-style).
+func (t *Table) QueryEntities(
+	ctx context.Context,
+	filter string,
+	top int,
+	selectFields []string,
+	nextPK, nextRK string,
+) (entities []*Entity, contPK string, contRK string, err error) {
+	start := time.Now()
+	fullScan := false
 	db := t.store.DB()
+	scanned := 0
 
-	// Extract partition key from filter to optimize the scan range
+	defer func() {
+		if t.metrics != nil {
+			t.metrics.ObserveQuery(QueryMetric{
+				Duration:     time.Since(start),
+				Returned:     len(entities),
+				Scanned:      scanned,
+				FullScan:     fullScan,
+				Err:          err != nil,
+				FilterError:  errors.Is(err, ErrInvalidFilter),
+				Continuation: contPK != "" || contRK != "",
+			})
+		}
+	}()
+
 	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
 
-	// Build prefix based on partition key filter
-	var prefix, upperBound []byte
+	var (
+		lowerBound []byte
+		upperBound []byte
+	)
+
 	if partitionKeyFilter != "" {
-		// If we have a partition key filter, scan only that partition
-		prefix = []byte(fmt.Sprintf("tables/data/%s/%s/", t.name, partitionKeyFilter))
-		upperBound = append(prefix, 0xff)
+		prefix := partitionPrefix(t.name, partitionKeyFilter)
+		lowerBound = prefix
+		upperBound = upperBoundForPrefix(prefix)
+
+		t.log.Debug("query using partition prefix",
+			"partitionKey", partitionKeyFilter,
+			"prefix", string(prefix))
 	} else {
-		// Full table scan
-		prefix = []byte(fmt.Sprintf("tables/data/%s/", t.name))
-		upperBound = append(prefix, 0xff)
+		fullScan = true
+		prefix := tablePrefix(t.name)
+		lowerBound = prefix
+		upperBound = upperBoundForPrefix(prefix)
+
+		if filter != "" {
+			t.log.Warn("query falling back to full table scan: failed to extract PartitionKey from filter",
+				"filter", filter)
+		} else {
+			t.log.Debug("query using full table scan (no filter)")
+		}
 	}
 
-	// Set lower bound based on continuation token
-	lowerBound := prefix
 	if nextPK != "" && nextRK != "" {
-		lowerBound = []byte(fmt.Sprintf("tables/data/%s/%s/%s", t.name, nextPK, nextRK))
+		lowerBound = dataKey(t.name, nextPK, nextRK)
 	}
 
-	iter, err := db.NewIter(&pebble.IterOptions{
+	iterStart := time.Now()
+	iter, newIterErr := db.NewIter(&pebble.IterOptions{
 		LowerBound: lowerBound,
 		UpperBound: upperBound,
 	})
-	if err != nil {
-		return nil, "", "", err
+	if newIterErr != nil {
+		err = newIterErr
+		return
 	}
 	defer iter.Close()
+	t.log.Debug("iterator created", "elapsed", time.Since(iterStart))
 
-	entities := make([]*Entity, 0)
-	count := 0
 	limit := top
 	if limit <= 0 {
-		limit = 1000 // Default page size
+		limit = 1000
 	}
 
-	// Pre-parse the filter once for efficiency
-	var filterFunc func(entity map[string]interface{}) bool
+	var filterFunc func(entity map[string]interface{}) (bool, error)
 	if filter != "" {
-		filterFunc = func(entity map[string]interface{}) bool {
+		filterFunc = func(entity map[string]interface{}) (bool, error) {
 			return MatchesFilter(filter, entity)
 		}
 	}
 
-	for iter.First(); iter.Valid(); iter.Next() {
+	scanStart := time.Now()
+	count := 0
+
+	logCompletion := func(hasMore bool) {
+		elapsed := time.Since(scanStart)
+		total := time.Since(start)
+		logger := t.log
+		level := logger.Debug
+		if elapsed >= slowQueryThreshold {
+			level = logger.Warn
+		}
+		level("query complete",
+			"returned", count,
+			"scanned", scanned,
+			"scanTime", elapsed,
+			"totalTime", total,
+			"hasMore", hasMore,
+			"fullScan", fullScan,
+		)
+	}
+
+	for ok := iter.First(); ok; ok = iter.Next() {
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			return
+		default:
+		}
+
+		scanned++
+
 		var entity Entity
-		if err := json.Unmarshal(iter.Value(), &entity); err != nil {
+		if unmarshalErr := json.Unmarshal(iter.Value(), &entity); unmarshalErr != nil {
 			continue
 		}
 
-		// Skip the continuation token entity itself (we want to start after it)
-		if nextPK != "" && nextRK != "" && entity.PartitionKey == nextPK && entity.RowKey == nextRK {
+		if nextPK != "" && nextRK != "" &&
+			entity.PartitionKey == nextPK &&
+			entity.RowKey == nextRK {
 			continue
 		}
 
-		// Apply filter if specified
 		if filterFunc != nil {
-			// Convert entity to map for filtering
 			entityMap := map[string]interface{}{
 				"PartitionKey": entity.PartitionKey,
 				"RowKey":       entity.RowKey,
@@ -513,7 +702,12 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 			for k, v := range entity.Properties {
 				entityMap[k] = v
 			}
-			if !filterFunc(entityMap) {
+			match, matchErr := filterFunc(entityMap)
+			if matchErr != nil {
+				err = matchErr
+				return
+			}
+			if !match {
 				continue
 			}
 		}
@@ -522,15 +716,19 @@ func (t *Table) QueryEntities(ctx context.Context, filter string, top int, selec
 		count++
 
 		if count >= limit {
-			// Check if there are more entities
-			if iter.Next() {
-				// Return continuation token
-				lastEntity := entities[len(entities)-1]
-				return entities, lastEntity.PartitionKey, lastEntity.RowKey, nil
+			hasMore := iter.Next()
+			if hasMore {
+				last := entities[len(entities)-1]
+				contPK = last.PartitionKey
+				contRK = last.RowKey
 			}
-			break
+
+			logCompletion(hasMore)
+			return
 		}
 	}
 
-	return entities, "", "", iter.Error()
+	logCompletion(false)
+	err = iter.Error()
+	return
 }

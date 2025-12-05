@@ -5,11 +5,11 @@ services:
       dockerfile: cmd/Dockerfile
     container_name: fazure-emulator
     ports:
-      - "10000:10000"  # Blob service
-      - "10001:10001"  # Queue service
-      - "10002:10002"  # Table service
+      - "10000:10000" # Blob service
+      - "10001:10001" # Queue service
+      - "10002:10002" # Table service
     environment:
-      - LOG_LEVEL=debug
+      - LOG_LEVEL=info
       - DATA_DIR=/data
     volumes:
       - fazure-data:/data

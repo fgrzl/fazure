@@ -3,6 +3,8 @@ package tables
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,7 +24,8 @@ func setupTestStore(t *testing.T) (*TableStore, func()) {
 	store, err := common.NewStore(filepath.Join(dir, "test.db"))
 	require.NoError(t, err)
 
-	tableStore, err := NewTableStore(store)
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	tableStore, err := NewTableStore(store, logger, NewMetrics())
 	require.NoError(t, err)
 
 	cleanup := func() {
@@ -560,6 +563,25 @@ func TestShouldFilterEntitiesGivenStatusFilter(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	assert.Len(t, entities, 2)
+}
+
+func TestShouldReturnErrorGivenUnsupportedFilter(t *testing.T) {
+	// Arrange
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	err := store.CreateTable(ctx, "testtable")
+	require.NoError(t, err)
+	table, err := store.GetTable(ctx, "testtable")
+	require.NoError(t, err)
+	_, err = table.InsertEntity(ctx, "pk", "rk1", map[string]interface{}{"Name": "Alice"})
+	require.NoError(t, err)
+
+	// Act
+	_, _, _, err = table.QueryEntities(ctx, "contains(Name,'Alice')", 0, nil, "", "")
+
+	// Assert
+	require.ErrorIs(t, err, ErrInvalidFilter)
 }
 
 func TestShouldScanOnlyPartitionGivenPartitionKeyFilter(t *testing.T) {

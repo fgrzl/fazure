@@ -8,6 +8,7 @@ var (
 	ErrEntityNotFound     = errors.New("entity not found")
 	ErrEntityExists       = errors.New("entity already exists")
 	ErrInvalidEntity      = errors.New("invalid entity")
+	ErrInvalidFilter      = errors.New("invalid $filter expression")
 	ErrPreconditionFailed = errors.New("precondition failed")
 
 	// Batch operation errors

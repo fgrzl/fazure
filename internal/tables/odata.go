@@ -30,10 +30,12 @@ func ParseODataQuery(filterStr, selectStr string, top int) *ODataQuery {
 	return q
 }
 
-// MatchesFilter checks if an entity matches the OData filter
-func MatchesFilter(filter string, entity map[string]interface{}) bool {
+// MatchesFilter checks if an entity matches the OData filter.
+// Returns ErrInvalidFilter when the filter expression is unsupported or malformed,
+// mirroring Azure Tables behavior of rejecting invalid $filter values.
+func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
 	if filter == "" {
-		return true
+		return true, nil
 	}
 
 	// Simplified filter parser - handles basic equality and logical operators
@@ -44,7 +46,14 @@ func MatchesFilter(filter string, entity map[string]interface{}) bool {
 	if andIndex >= 0 {
 		left := strings.TrimSpace(filter[:andIndex])
 		right := strings.TrimSpace(filter[andIndex+5:])
-		return MatchesFilter(left, entity) && MatchesFilter(right, entity)
+		l, err := MatchesFilter(left, entity)
+		if err != nil {
+			return false, err
+		}
+		if !l {
+			return false, nil
+		}
+		return MatchesFilter(right, entity)
 	}
 
 	// Handle 'or' operator (case insensitive)
@@ -52,7 +61,14 @@ func MatchesFilter(filter string, entity map[string]interface{}) bool {
 	if orIndex >= 0 {
 		left := strings.TrimSpace(filter[:orIndex])
 		right := strings.TrimSpace(filter[orIndex+4:])
-		return MatchesFilter(left, entity) || MatchesFilter(right, entity)
+		l, err := MatchesFilter(left, entity)
+		if err != nil {
+			return false, err
+		}
+		if l {
+			return true, nil
+		}
+		return MatchesFilter(right, entity)
 	}
 
 	return evaluateSimpleFilter(filter, entity)
@@ -65,8 +81,9 @@ func findOperatorIndex(s, op string) int {
 	return strings.Index(lower, lowerOp)
 }
 
-// evaluateSimpleFilter evaluates a single filter expression
-func evaluateSimpleFilter(filter string, entity map[string]interface{}) bool {
+// evaluateSimpleFilter evaluates a single filter expression.
+// Returns ErrInvalidFilter when no supported operator is found.
+func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, error) {
 	filter = strings.TrimSpace(filter)
 
 	// Handle comparison operators: eq, ne, lt, le, gt, ge
@@ -96,14 +113,14 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) bool {
 			// Get value from entity
 			val, ok := entity[left]
 			if !ok {
-				return false
+				return false, nil
 			}
 
-			return op.eval(val, right)
+			return op.eval(val, right), nil
 		}
 	}
 
-	return true
+	return false, ErrInvalidFilter
 }
 
 // compareValues compares two values, handling type conversion
