@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fgrzl/fazure/internal/common"
 )
@@ -429,9 +430,16 @@ func (h *Handler) DeleteEntity(w http.ResponseWriter, r *http.Request, tableName
 		return
 	}
 
-	if err := table.DeleteEntity(ctx, pk, rk); err != nil {
+	ifMatch := r.Header.Get("If-Match")
+	err = table.DeleteEntityWithETag(ctx, pk, rk, ifMatch)
+	if err != nil {
 		if err == ErrEntityNotFound {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			return
+		}
+		if err == ErrPreconditionFailed {
+			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
+				"The update condition specified in the request was not satisfied")
 			return
 		}
 		h.log.Error("failed to delete entity", "table", tableName, "error", err)
@@ -509,10 +517,11 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 
 	var responseEntities []map[string]interface{}
 	for _, entity := range entities {
+		timestamp := entity.Timestamp.UTC().Format(time.RFC3339Nano)
 		entityMap := map[string]interface{}{
 			"PartitionKey": entity.PartitionKey,
 			"RowKey":       entity.RowKey,
-			"Timestamp":    entity.Timestamp.Unix(),
+			"Timestamp":    timestamp,
 			"ETag":         entity.ETag,
 		}
 		for k, v := range entity.Properties {
@@ -523,7 +532,7 @@ func (h *Handler) QueryEntities(w http.ResponseWriter, r *http.Request, tableNam
 			projected := map[string]interface{}{
 				"PartitionKey": entity.PartitionKey,
 				"RowKey":       entity.RowKey,
-				"Timestamp":    entity.Timestamp.Unix(),
+				"Timestamp":    timestamp,
 				"ETag":         entity.ETag,
 			}
 			for _, field := range selectFields {

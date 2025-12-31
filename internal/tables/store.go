@@ -29,7 +29,7 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 	m := map[string]interface{}{
 		"PartitionKey": e.PartitionKey,
 		"RowKey":       e.RowKey,
-		"Timestamp":    e.Timestamp.Unix(),
+		"Timestamp":    e.Timestamp.Format(time.RFC3339Nano),
 		"ETag":         e.ETag,
 	}
 
@@ -56,7 +56,15 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	if etag, ok := m["ETag"].(string); ok {
 		e.ETag = etag
 	}
-	if ts, ok := m["Timestamp"].(float64); ok {
+	if ts, ok := m["Timestamp"].(string); ok {
+		// Parse ISO 8601 / RFC3339 timestamp
+		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			e.Timestamp = parsed.UTC()
+		} else if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
+			e.Timestamp = parsed.UTC()
+		}
+	} else if ts, ok := m["Timestamp"].(float64); ok {
+		// Fallback: Unix timestamp for backward compatibility
 		e.Timestamp = time.Unix(int64(ts), 0).UTC()
 	}
 
@@ -125,10 +133,23 @@ func partitionPrefix(table, pk string) []byte {
 }
 
 // upperBoundForPrefix returns an upper bound suitable for Pebble range scans.
+// It increments the last non-0xff byte to create an exclusive upper bound for prefix scans.
 func upperBoundForPrefix(prefix []byte) []byte {
-	upper := make([]byte, len(prefix)+1)
-	copy(upper, prefix)
-	upper[len(prefix)] = 0xff
+	// Find the last byte that can be incremented
+	end := len(prefix)
+	for end > 0 && prefix[end-1] == 0xff {
+		end--
+	}
+
+	// If all bytes are 0xff, no upper bound is needed
+	if end == 0 {
+		return nil
+	}
+
+	// Copy and increment the last non-0xff byte
+	upper := make([]byte, end)
+	copy(upper, prefix[:end])
+	upper[end-1]++
 	return upper
 }
 
@@ -325,14 +346,17 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		RowKey:       rowKey,
 		Timestamp:    time.Now().UTC(),
 		Properties:   properties,
+		ETag:         "", // Will be set after initial marshal
 	}
 
+	// Marshal once to compute ETag
 	data, err := json.Marshal(entity)
 	if err != nil {
 		return nil, err
 	}
 	entity.ETag = common.GenerateETag(data)
 
+	// Marshal again with ETag included
 	data, err = json.Marshal(entity)
 	if err != nil {
 		return nil, err
@@ -431,12 +455,16 @@ func (t *Table) UpdateEntityWithETag(
 	}
 
 	entity.Timestamp = time.Now().UTC()
+	entity.ETag = "" // Reset for consistent ETag computation
+
+	// Marshal once to compute ETag
 	data, err = json.Marshal(&entity)
 	if err != nil {
 		return nil, err
 	}
 	entity.ETag = common.GenerateETag(data)
 
+	// Marshal again with ETag included
 	data, err = json.Marshal(&entity)
 	if err != nil {
 		return nil, err
@@ -495,12 +523,16 @@ func (t *Table) UpsertEntity(
 	}
 
 	entity.Timestamp = time.Now().UTC()
+	entity.ETag = "" // Reset for consistent ETag computation
+
+	// Marshal once to compute ETag
 	marshaledData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
 	}
 	entity.ETag = common.GenerateETag(marshaledData)
 
+	// Marshal again with ETag included
 	finalData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
@@ -515,17 +547,39 @@ func (t *Table) UpsertEntity(
 
 // DeleteEntity deletes an entity.
 func (t *Table) DeleteEntity(ctx context.Context, partitionKey, rowKey string) error {
+	return t.DeleteEntityWithETag(ctx, partitionKey, rowKey, "")
+}
+
+// DeleteEntityWithETag deletes an entity with optional ETag validation.
+func (t *Table) DeleteEntityWithETag(ctx context.Context, partitionKey, rowKey, ifMatch string) error {
 	db := t.store.DB()
 	key := dataKey(t.name, partitionKey, rowKey)
 
-	_, closer, err := db.Get(key)
+	data, closer, err := db.Get(key)
 	if err == pebble.ErrNotFound {
 		return ErrEntityNotFound
 	}
 	if err != nil {
 		return err
 	}
-	closer.Close()
+
+	// If ETag validation is requested, check it
+	if ifMatch != "" && ifMatch != "*" {
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		closer.Close()
+
+		var entity Entity
+		if err := json.Unmarshal(dataCopy, &entity); err != nil {
+			return err
+		}
+
+		if entity.ETag != ifMatch {
+			return ErrPreconditionFailed
+		}
+	} else {
+		closer.Close()
+	}
 
 	return db.Delete(key, pebble.NoSync)
 }
@@ -599,6 +653,7 @@ func (t *Table) QueryEntities(
 
 	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
 	pkHint = partitionKeyFilter
+	rowKeyHint := extractRowKeyHint(filter)
 
 	var (
 		lowerBound []byte
@@ -610,12 +665,31 @@ func (t *Table) QueryEntities(
 		lowerBound = prefix
 		upperBound = upperBoundForPrefix(prefix)
 
+		// If we have RowKey range hints within this partition, refine the bounds
+		if rowKeyHint.Exact != "" {
+			// Exact RowKey: narrow to single entity
+			lowerBound = dataKey(t.name, partitionKeyFilter, rowKeyHint.Exact)
+			upperBound = dataKey(t.name, partitionKeyFilter, rowKeyHint.Exact+"\x00")
+		} else if rowKeyHint.UseRange {
+			// RowKey range: set bounds within partition
+			if rowKeyHint.RangeStart != "" {
+				lowerBound = dataKey(t.name, partitionKeyFilter, rowKeyHint.RangeStart)
+			}
+			if rowKeyHint.RangeEnd != "" {
+				// For RowKey le/lt, we need to include up to and possibly including the end key
+				// Using upperBoundForPrefix on the end key's prefix
+				endKey := dataKey(t.name, partitionKeyFilter, rowKeyHint.RangeEnd)
+				upperBound = upperBoundForPrefix(endKey)
+			}
+		}
+
 		t.log.Debug("query using partition prefix",
 			"partitionKey", partitionKeyFilter,
 			"prefix", string(prefix),
 			"filter", filter,
 			"top", top,
 			"continuation", nextPK != "" || nextRK != "",
+			"rowKeyHint", rowKeyHint.UseRange || rowKeyHint.Exact != "",
 		)
 	} else {
 		fullScan = true

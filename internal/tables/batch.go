@@ -26,6 +26,7 @@ type BatchOperation struct {
 	Body         []byte
 	PartitionKey string
 	RowKey       string
+	TableName    string
 	EntityData   map[string]interface{}
 }
 
@@ -171,6 +172,7 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 					Body:         body,
 					PartitionKey: pk,
 					RowKey:       rk,
+					TableName:    tableName,
 					EntityData:   entityData,
 				}
 				batchReq.Operations = append(batchReq.Operations, op)
@@ -195,8 +197,17 @@ func ValidateBatchRequest(req *BatchRequest) error {
 		return ErrInvalidBatchRequest
 	}
 
+	firstTable := req.Operations[0].TableName
+	if firstTable == "" {
+		return ErrInvalidBatchRequest
+	}
+	req.TableName = firstTable
+
 	firstPartition := req.Operations[0].PartitionKey
 	for _, op := range req.Operations[1:] {
+		if op.TableName != firstTable {
+			return ErrInvalidBatchRequest
+		}
 		if op.PartitionKey != firstPartition {
 			return ErrBatchPartitionMismatch
 		}

@@ -184,37 +184,176 @@ func SelectFields(entity map[string]interface{}, fields []string) map[string]int
 	return result
 }
 
-// extractPartitionKeyFromFilter extracts PartitionKey equality value from OData filter
-// This allows optimizing queries by scanning only the relevant partition
+// PartitionKeyHint represents extracted partition key filter information
+type PartitionKeyHint struct {
+	Exact      string // Exact match value from "PartitionKey eq 'value'"
+	RangeStart string // Start value from "PartitionKey ge 'value'" or "PartitionKey gt 'value'"
+	RangeEnd   string // End value from "PartitionKey le 'value'" or "PartitionKey lt 'value'"
+	UseRange   bool   // True if range operators were found
+}
+
+// RowKeyHint represents extracted row key filter information
+type RowKeyHint struct {
+	Exact      string // Exact match value from "RowKey eq 'value'"
+	RangeStart string // Start value from "RowKey ge 'value'" or "RowKey gt 'value'"
+	RangeEnd   string // End value from "RowKey le 'value'" or "RowKey lt 'value'"
+	UseRange   bool   // True if range operators were found
+}
+
+// extractPartitionKeyFromFilter extracts PartitionKey filter information from OData filter
+// This allows optimizing queries by scanning only the relevant partition or partition range
 func extractPartitionKeyFromFilter(filter string) string {
+	hint := extractPartitionKeyHint(filter)
+	if hint.Exact != "" {
+		return hint.Exact
+	}
+	// For now, if we only have range queries, return the range start
+	// This allows prefix optimization for range queries like "PartitionKey ge 'X' and PartitionKey le 'Y'"
+	if hint.UseRange && hint.RangeStart != "" {
+		return hint.RangeStart
+	}
+	return ""
+}
+
+// extractPartitionKeyHint extracts detailed PartitionKey filter information
+func extractPartitionKeyHint(filter string) PartitionKeyHint {
+	hint := PartitionKeyHint{}
+
 	if filter == "" {
-		return ""
+		return hint
 	}
 
 	filter = strings.TrimSpace(filter)
 
-	// Look for PartitionKey eq 'value' pattern
+	// Look for PartitionKey patterns
 	// Handle both standalone and AND-combined filters
 	parts := strings.Split(strings.ToLower(filter), " and ")
 	originalParts := splitPreservingCase(filter, " and ")
 
 	for i, part := range parts {
 		part = strings.TrimSpace(part)
+		origPart := strings.TrimSpace(originalParts[i])
+
+		// Check for PartitionKey eq 'value'
 		if strings.HasPrefix(part, "partitionkey eq ") {
-			// Extract the value from the original (case-preserved) part
-			origPart := strings.TrimSpace(originalParts[i])
 			idx := findOperatorIndex(origPart, " eq ")
 			if idx >= 0 {
 				value := strings.TrimSpace(origPart[idx+4:])
-				// Remove quotes
 				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
-					return value[1 : len(value)-1]
+					hint.Exact = value[1 : len(value)-1]
+					return hint // Exact match takes precedence
+				}
+			}
+		}
+
+		// Check for PartitionKey ge 'value' or PartitionKey gt 'value'
+		if strings.HasPrefix(part, "partitionkey ge ") || strings.HasPrefix(part, "partitionkey gt ") {
+			var idx int
+			if strings.HasPrefix(part, "partitionkey ge ") {
+				idx = findOperatorIndex(origPart, " ge ")
+			} else {
+				idx = findOperatorIndex(origPart, " gt ")
+			}
+			if idx >= 0 {
+				opLen := 4 // length of " ge " or " gt "
+				value := strings.TrimSpace(origPart[idx+opLen:])
+				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+					hint.RangeStart = value[1 : len(value)-1]
+					hint.UseRange = true
+				}
+			}
+		}
+
+		// Check for PartitionKey le 'value' or PartitionKey lt 'value'
+		if strings.HasPrefix(part, "partitionkey le ") || strings.HasPrefix(part, "partitionkey lt ") {
+			var idx int
+			if strings.HasPrefix(part, "partitionkey le ") {
+				idx = findOperatorIndex(origPart, " le ")
+			} else {
+				idx = findOperatorIndex(origPart, " lt ")
+			}
+			if idx >= 0 {
+				opLen := 4 // length of " le " or " lt "
+				value := strings.TrimSpace(origPart[idx+opLen:])
+				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+					hint.RangeEnd = value[1 : len(value)-1]
+					hint.UseRange = true
 				}
 			}
 		}
 	}
 
-	return ""
+	return hint
+}
+
+// extractRowKeyHint extracts detailed RowKey filter information
+func extractRowKeyHint(filter string) RowKeyHint {
+	hint := RowKeyHint{}
+
+	if filter == "" {
+		return hint
+	}
+
+	filter = strings.TrimSpace(filter)
+
+	// Look for RowKey patterns
+	parts := strings.Split(strings.ToLower(filter), " and ")
+	originalParts := splitPreservingCase(filter, " and ")
+
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		origPart := strings.TrimSpace(originalParts[i])
+
+		// Check for RowKey eq 'value'
+		if strings.HasPrefix(part, "rowkey eq ") {
+			idx := findOperatorIndex(origPart, " eq ")
+			if idx >= 0 {
+				value := strings.TrimSpace(origPart[idx+4:])
+				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+					hint.Exact = value[1 : len(value)-1]
+					return hint // Exact match takes precedence
+				}
+			}
+		}
+
+		// Check for RowKey ge 'value' or RowKey gt 'value'
+		if strings.HasPrefix(part, "rowkey ge ") || strings.HasPrefix(part, "rowkey gt ") {
+			var idx int
+			if strings.HasPrefix(part, "rowkey ge ") {
+				idx = findOperatorIndex(origPart, " ge ")
+			} else {
+				idx = findOperatorIndex(origPart, " gt ")
+			}
+			if idx >= 0 {
+				opLen := 4 // length of " ge " or " gt "
+				value := strings.TrimSpace(origPart[idx+opLen:])
+				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+					hint.RangeStart = value[1 : len(value)-1]
+					hint.UseRange = true
+				}
+			}
+		}
+
+		// Check for RowKey le 'value' or RowKey lt 'value'
+		if strings.HasPrefix(part, "rowkey le ") || strings.HasPrefix(part, "rowkey lt ") {
+			var idx int
+			if strings.HasPrefix(part, "rowkey le ") {
+				idx = findOperatorIndex(origPart, " le ")
+			} else {
+				idx = findOperatorIndex(origPart, " lt ")
+			}
+			if idx >= 0 {
+				opLen := 4 // length of " le " or " lt "
+				value := strings.TrimSpace(origPart[idx+opLen:])
+				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
+					hint.RangeEnd = value[1 : len(value)-1]
+					hint.UseRange = true
+				}
+			}
+		}
+	}
+
+	return hint
 }
 
 // splitPreservingCase splits a string by separator (case-insensitive) while preserving original case
