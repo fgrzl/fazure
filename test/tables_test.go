@@ -39,7 +39,6 @@ func TestMain(m *testing.M) {
 		fmt.Println("failed to create temp dir:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(dir)
 
 	store, err := common.NewStore(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -56,7 +55,6 @@ func TestMain(m *testing.M) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.HandleRequest)
 	server := httptest.NewServer(mux)
-	defer server.Close()
 
 	// Override emulator URL used by tests
 	tableEmulatorURL = server.URL
