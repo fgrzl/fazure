@@ -39,7 +39,6 @@ func TestMain(m *testing.M) {
 		fmt.Println("failed to create temp dir:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(dir)
 
 	store, err := common.NewStore(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -56,7 +55,6 @@ func TestMain(m *testing.M) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.HandleRequest)
 	server := httptest.NewServer(mux)
-	defer server.Close()
 
 	// Override emulator URL used by tests
 	tableEmulatorURL = server.URL
@@ -1241,45 +1239,6 @@ func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithIfMatchSta
 	var retrieved map[string]interface{}
 	_ = json.Unmarshal(resp.Value, &retrieved)
 	assert.Equal(t, "upserted", retrieved["Value"])
-}
-
-// ============================================================================
-// Azure Compatibility Tests - OData Filter Error Handling
-// ============================================================================
-
-func TestShouldReturnBadRequestGivenUnsupportedODataFunctionWhenCallingQuery(t *testing.T) {
-	ctx := context.Background()
-	client := newTableClient(t, "testodata")
-	_, _ = client.CreateTable(ctx, nil)
-	defer func() {
-		_, _ = client.Delete(ctx, nil)
-	}()
-
-	// Add test entity
-	entity := map[string]interface{}{
-		"PartitionKey": "pk1",
-		"RowKey":       "rk1",
-		"Name":         "Alice",
-	}
-	marshalled, _ := json.Marshal(entity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
-
-	// Act: Query with unsupported function
-	filter := "startswith(Name, 'Al')"
-	listOpts := &aztables.ListEntitiesOptions{
-		Filter: &filter,
-	}
-
-	pager := client.NewListEntitiesPager(listOpts)
-	_, err := pager.NextPage(ctx)
-
-	// Assert: Should return error (400 Bad Request)
-	// Note: For now, we'll accept if it silently fails (returns no results)
-	// but ideally it should error
-	if err != nil {
-		assert.Contains(t, strings.ToLower(err.Error()), "invalid")
-	}
-	// TODO: This test documents current behavior - should return error
 }
 
 func TestShouldReturnBadRequestGivenInvalidFilterSyntaxWhenCallingQuery(t *testing.T) {

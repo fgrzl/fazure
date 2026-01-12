@@ -10,8 +10,8 @@ type Store struct {
 	db *pebble.DB
 }
 
-// NewStore creates a Pebble DB tuned for Azure-Table patterns (range scans + point lookups)
-// and avoids multi-second stalls seen with the previous configuration.
+// NewStore creates a Pebble DB using the default Pebble options.
+// Callers receive an unmodified Pebble instance without workload-specific tuning.
 func NewStore(datadir string) (*Store, error) {
 
 	opts := &pebble.Options{}

@@ -299,8 +299,8 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 			return
 		}
 		if err == ErrInvalidEntity {
-			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
-			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
+			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 			return
 		}
 		h.log.Error("failed to insert entity", "table", tableName, "error", err)
@@ -343,8 +343,8 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
 			if err == ErrInvalidEntity {
-				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
-				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
+				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 				return
 			}
 			h.log.Error("failed to insert entity for upsert", "table", tableName, "error", err)
@@ -377,8 +377,8 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 				return
 			}
 			if err == ErrInvalidEntity {
-				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
-				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
+				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 				return
 			}
 			h.log.Error("failed to update entity", "table", tableName, "error", err)

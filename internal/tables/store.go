@@ -275,7 +275,7 @@ func validateTableName(tableName string) error {
 	}
 	for i := 0; i < len(tableName); i++ {
 		c := tableName[i]
-		if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') {
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
 			return ErrInvalidTableName
 		}
 	}
