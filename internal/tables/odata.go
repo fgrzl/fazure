@@ -41,6 +41,28 @@ func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
 	// Simplified filter parser - handles basic equality and logical operators
 	filter = strings.TrimSpace(filter)
 
+	// Strip surrounding parentheses if they enclose the whole expression
+	if strings.HasPrefix(filter, "(") && strings.HasSuffix(filter, ")") {
+		// check balance
+		depth := 0
+		balanced := true
+		for i := 0; i < len(filter); i++ {
+			c := filter[i]
+			if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth == 0 && i != len(filter)-1 {
+					balanced = false
+					break
+				}
+			}
+		}
+		if balanced {
+			return MatchesFilter(strings.TrimSpace(filter[1:len(filter)-1]), entity)
+		}
+	}
+
 	// Handle 'and' operator (case insensitive)
 	andIndex := findOperatorIndex(filter, " and ")
 	if andIndex >= 0 {
@@ -75,10 +97,45 @@ func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
 }
 
 // findOperatorIndex finds the index of an operator (case insensitive)
+// It skips operators that are inside parentheses.
+// The operator can be provided with or without surrounding spaces; this function
+// tolerates either and ensures the operator is matched as a standalone token.
 func findOperatorIndex(s, op string) int {
 	lower := strings.ToLower(s)
 	lowerOp := strings.ToLower(op)
-	return strings.Index(lower, lowerOp)
+	opLen := len(lowerOp)
+	depth := 0
+	for i := 0; i <= len(lower)-opLen; i++ {
+		c := lower[i]
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && i+opLen <= len(lower) && lower[i:i+opLen] == lowerOp {
+			// Determine surrounding character constraints.
+			// If the operator string starts/ends with a space, skip checking that side
+			beforeOK := true
+			afterOK := true
+			if !strings.HasPrefix(lowerOp, " ") {
+				beforeOK = i == 0 || isSeparator(lower[i-1])
+			}
+			if !strings.HasSuffix(lowerOp, " ") {
+				afterOK = i+opLen == len(lower) || isSeparator(lower[i+opLen])
+			}
+			if beforeOK && afterOK {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func isSeparator(c byte) bool {
+	return c == ' ' || c == '(' || c == ')'
 }
 
 // evaluateSimpleFilter evaluates a single filter expression.

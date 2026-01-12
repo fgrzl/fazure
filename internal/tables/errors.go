@@ -10,6 +10,7 @@ var (
 	ErrInvalidEntity      = errors.New("invalid entity")
 	ErrInvalidFilter      = errors.New("invalid $filter expression")
 	ErrPreconditionFailed = errors.New("precondition failed")
+	ErrInvalidTableName   = errors.New("invalid table name")
 
 	// Batch operation errors
 	ErrInvalidBatchRequest    = errors.New("invalid batch request")

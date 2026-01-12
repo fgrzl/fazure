@@ -1,4 +1,4 @@
-﻿package tables
+package tables
 
 import (
 	"context"
@@ -268,8 +268,32 @@ func (ts *TableStore) ListTables(ctx context.Context) ([]map[string]string, erro
 	return tables, iter.Error()
 }
 
+func validateTableName(tableName string) error {
+	if len(tableName) < 3 || len(tableName) > 63 {
+		return ErrInvalidTableName
+	}
+	// Must start with a letter
+	first := tableName[0]
+	if (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
+		return ErrInvalidTableName
+	}
+	for i := 0; i < len(tableName); i++ {
+		c := tableName[i]
+		if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') {
+			return ErrInvalidTableName
+		}
+	}
+	if strings.EqualFold(tableName, "Tables") {
+		return ErrInvalidTableName
+	}
+	return nil
+}
+
 // CreateTable creates a new table.
 func (ts *TableStore) CreateTable(ctx context.Context, tableName string) error {
+	if err := validateTableName(tableName); err != nil {
+		return err
+	}
 	db := ts.store.DB()
 	key := metaKey(tableName)
 
@@ -385,8 +409,94 @@ func (ts *TableStore) GetTable(ctx context.Context, tableName string) (*Table, e
 	}, nil
 }
 
+// keyValidation helpers
+func validateKey(name, v string) error {
+	if v == "" {
+		return ErrInvalidEntity
+	}
+	if len(v) > 1024 {
+		return ErrInvalidEntity
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '/' || c == '\\' || c == '#' || c == '?' || c == '\t' || c == '\n' || c < 0x20 {
+			return ErrInvalidEntity
+		}
+	}
+	return nil
+}
+
+func validatePropertyName(n string) error {
+	if len(n) > 255 {
+		return ErrInvalidEntity
+	}
+	for i := 0; i < len(n); i++ {
+		c := n[i]
+		if c < 0x20 {
+			return ErrInvalidEntity
+		}
+	}
+	return nil
+}
+
+func validateProperties(props map[string]interface{}) error {
+	if props == nil {
+		return nil
+	}
+	count := 0
+	for k, v := range props {
+		if k == "PartitionKey" || k == "RowKey" {
+			continue
+		}
+		if strings.HasSuffix(k, "@odata.type") {
+			// type annotations don't count as separate properties
+			continue
+		}
+		count++
+		if err := validatePropertyName(k); err != nil {
+			return err
+		}
+		// check string property sizes
+		switch vv := v.(type) {
+		case string:
+			if len(vv) > 64*1024 {
+				return ErrInvalidEntity
+			}
+		}
+	}
+	if count > 255 {
+		return ErrInvalidEntity
+	}
+	return nil
+}
+
+func validateEntitySize(e *Entity) error {
+	// Marshal to compute size
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	if len(b) > 1*1024*1024 {
+		return ErrInvalidEntity
+	}
+	return nil
+}
+
 // InsertEntity inserts a new entity (fails if exists).
 func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}) (*Entity, error) {
+	// validate keys
+	if err := validateKey("PartitionKey", partitionKey); err != nil {
+		return nil, err
+	}
+	if err := validateKey("RowKey", rowKey); err != nil {
+		return nil, err
+	}
+
+	// validate properties
+	if err := validateProperties(properties); err != nil {
+		return nil, err
+	}
+
 	db := t.store.DB()
 	key := dataKey(t.name, partitionKey, rowKey)
 
@@ -408,6 +518,11 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		Timestamp:    time.Now().UTC(),
 		Properties:   filteredProps,
 		ETag:         "", // Will be set after initial marshal
+	}
+
+	// validate entity size
+	if err := validateEntitySize(entity); err != nil {
+		return nil, err
 	}
 
 	// Marshal once to compute ETag
@@ -518,6 +633,10 @@ func (t *Table) UpdateEntityWithETag(
 		}
 	}
 
+	// Validate properties and entity size before persisting
+	if err := validateProperties(entity.Properties); err != nil {
+		return nil, err
+	}
 	entity.Timestamp = time.Now().UTC()
 	entity.ETag = "" // Reset for consistent ETag computation
 
@@ -525,6 +644,10 @@ func (t *Table) UpdateEntityWithETag(
 	data, err = json.Marshal(&entity)
 	if err != nil {
 		return nil, err
+	}
+	// check size limit
+	if len(data) > 1*1024*1024 {
+		return nil, ErrInvalidEntity
 	}
 	entity.ETag = common.GenerateETag(data)
 
@@ -589,6 +712,10 @@ func (t *Table) UpsertEntity(
 		}
 	}
 
+	// Validate properties and entity size
+	if err := validateProperties(entity.Properties); err != nil {
+		return nil, err
+	}
 	entity.Timestamp = time.Now().UTC()
 	entity.ETag = "" // Reset for consistent ETag computation
 
@@ -596,6 +723,9 @@ func (t *Table) UpsertEntity(
 	marshaledData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
+	}
+	if len(marshaledData) > 1*1024*1024 {
+		return nil, ErrInvalidEntity
 	}
 	entity.ETag = common.GenerateETag(marshaledData)
 
@@ -719,19 +849,19 @@ func (t *Table) QueryEntities(
 	}()
 
 	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
-// Validate filter syntax upfront before iteration
-// This ensures we catch invalid filters even on empty tables
-if filter != "" {
-// Test the filter with an empty entity to validate syntax
-testEntity := map[string]interface{}{
-"PartitionKey": "",
-"RowKey":       "",
-}
-if _, testErr := MatchesFilter(filter, testEntity); testErr != nil {
-err = testErr
-return
-}
-}
+	// Validate filter syntax upfront before iteration
+	// This ensures we catch invalid filters even on empty tables
+	if filter != "" {
+		// Test the filter with an empty entity to validate syntax
+		testEntity := map[string]interface{}{
+			"PartitionKey": "",
+			"RowKey":       "",
+		}
+		if _, testErr := MatchesFilter(filter, testEntity); testErr != nil {
+			err = testErr
+			return
+		}
+	}
 
 	pkHint = partitionKeyFilter
 	rowKeyHint := extractRowKeyHint(filter)

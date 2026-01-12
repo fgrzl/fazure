@@ -132,6 +132,8 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // writeError writes an Azure Storage error response.
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
+	// Debug: print error being written
+	fmt.Printf("writeError: status=%d code=%s message=%s\n", statusCode, errorCode, message)
 	h.log.Warn("error response",
 		"statusCode", statusCode,
 		"errorCode", errorCode,
@@ -264,6 +266,10 @@ func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, p
 // InsertEntity inserts a new entity.
 func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName string) {
 	ctx := r.Context()
+
+	// Debug: log request metadata to help diagnose intermittent hangs in tests
+	// (temporary change) - prints to stdout so test output will show it.
+	fmt.Printf("InsertEntity called: table=%s ContentLength=%d TransferEncoding=%v\n", tableName, r.ContentLength, r.TransferEncoding)
 
 	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {

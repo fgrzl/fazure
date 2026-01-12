@@ -197,6 +197,15 @@ func ValidateBatchRequest(req *BatchRequest) error {
 		return ErrInvalidBatchRequest
 	}
 
+	// Validate total batch size (4MB maximum)
+	totalSize := 0
+	for _, op := range req.Operations {
+		totalSize += len(op.Body)
+	}
+	if totalSize > 4*1024*1024 {
+		return ErrInvalidBatchRequest
+	}
+
 	firstTable := req.Operations[0].TableName
 	if firstTable == "" {
 		return ErrInvalidBatchRequest

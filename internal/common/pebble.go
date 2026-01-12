@@ -8,8 +8,8 @@ import (
 	"github.com/cockroachdb/pebble/v2/sstable/block"
 )
 
-func snappyCompression() *block.CompressionProfile {
-	return block.SnappyCompression
+func compression() *block.CompressionProfile {
+	return block.BalancedCompression
 }
 
 type Store struct {
@@ -39,22 +39,14 @@ func NewStore(datadir string) (*Store, error) {
 
 		// Level options tuned for mixed point + range queries.
 		Levels: [7]pebble.LevelOptions{
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
-			{FilterPolicy: bloom.FilterPolicy(10), Compression: snappyCompression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
+			{FilterPolicy: bloom.FilterPolicy(10), Compression: compression},
 		},
-
-		// These two *do* exist and control L0 pressure.
-		// They prevent runaway L0 buildup and stop the long read stalls you observed.
-		L0CompactionThreshold: 4,
-		L0StopWritesThreshold: 12,
-
-		// Recommended for modern Pebble engines.
-		FormatMajorVersion: pebble.FormatNewest,
 	}
 
 	db, err := pebble.Open(datadir, opts)
