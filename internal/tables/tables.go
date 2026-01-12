@@ -132,8 +132,6 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // writeError writes an Azure Storage error response.
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
-	// Debug: print error being written
-	fmt.Printf("writeError: status=%d code=%s message=%s\n", statusCode, errorCode, message)
 	h.log.Warn("error response",
 		"statusCode", statusCode,
 		"errorCode", errorCode,
@@ -182,6 +180,11 @@ func (h *Handler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("creating table", "table", req.TableName)
 
 	if err := h.store.CreateTable(ctx, req.TableName); err != nil {
+		if err == ErrInvalidTableName {
+			h.log.Debug("invalid table name", "table", req.TableName)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid table name")
+			return
+		}
 		if err == ErrTableExists {
 			h.log.Debug("table already exists", "table", req.TableName)
 			h.writeError(w, http.StatusConflict, "TableAlreadyExists", "Table already exists")
@@ -267,10 +270,6 @@ func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, p
 func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName string) {
 	ctx := r.Context()
 
-	// Debug: log request metadata to help diagnose intermittent hangs in tests
-	// (temporary change) - prints to stdout so test output will show it.
-	fmt.Printf("InsertEntity called: table=%s ContentLength=%d TransferEncoding=%v\n", tableName, r.ContentLength, r.TransferEncoding)
-
 	table, err := h.store.GetTable(ctx, tableName)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, "TableNotFound", "Table not found")
@@ -297,6 +296,11 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 		if err == ErrEntityExists {
 			h.log.Debug("entity already exists", "table", tableName, "partitionKey", pk, "rowKey", rk)
 			h.writeError(w, http.StatusConflict, "EntityAlreadyExists", "Entity already exists")
+			return
+		}
+		if err == ErrInvalidEntity {
+			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
 			return
 		}
 		h.log.Error("failed to insert entity", "table", tableName, "error", err)
@@ -338,6 +342,11 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		// Upsert: insert when not found and If-Match is *.
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
+			if err == ErrInvalidEntity {
+				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
+				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
+				return
+			}
 			h.log.Error("failed to insert entity for upsert", "table", tableName, "error", err)
 			h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 			return
@@ -365,6 +374,11 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 			if err == ErrPreconditionFailed {
 				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 					"The update condition specified in the request was not satisfied")
+				return
+			}
+			if err == ErrInvalidEntity {
+				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
+				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
 				return
 			}
 			h.log.Error("failed to update entity", "table", tableName, "error", err)
@@ -413,6 +427,11 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 		if err == ErrPreconditionFailed {
 			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 				"The update condition specified in the request was not satisfied")
+			return
+		}
+		if err == ErrInvalidEntity {
+			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
 			return
 		}
 		h.log.Error("failed to merge entity", "table", tableName, "error", err)
