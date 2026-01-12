@@ -516,11 +516,6 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		ETag:         "", // Will be set after initial marshal
 	}
 
-	// validate entity size
-	if err := validateEntitySize(entity); err != nil {
-		return nil, err
-	}
-
 	// Marshal once to compute ETag
 	data, err := json.Marshal(entity)
 	if err != nil {
