@@ -430,8 +430,8 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 			return
 		}
 		if err == ErrInvalidEntity {
-			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk)
-			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: PartitionKey and RowKey cannot contain /, \\, #, ?, or control characters")
+			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 			return
 		}
 		h.log.Error("failed to merge entity", "table", tableName, "error", err)
