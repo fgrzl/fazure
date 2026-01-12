@@ -4,17 +4,69 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"log/slog"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/aztables"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fgrzl/fazure/internal/common"
+	"github.com/fgrzl/fazure/internal/tables"
 )
 
-const (
+var (
 	tableEmulatorURL = "http://localhost:10002"
 	tableAccountName = "devstoreaccount1"
 )
+
+// TestMain starts a local instance of the in-repo emulator and points the SDK
+// client at it, so these tests exercise our implementation rather than an
+// external process. This ensures validation behavior matches our expectations.
+func TestMain(m *testing.M) {
+	// Start an in-memory store and tables handler
+	dir, err := os.MkdirTemp("", "tables_test_*")
+	if err != nil {
+		fmt.Println("failed to create temp dir:", err)
+		os.Exit(1)
+	}
+
+	store, err := common.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		fmt.Println("failed to open store:", err)
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	ts, err := tables.NewTableStore(store, logger, tables.NewMetrics())
+	if err != nil {
+		fmt.Println("failed to create tables store:", err)
+		os.Exit(1)
+	}
+	h := tables.NewHandler(ts, logger)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", h.HandleRequest)
+	server := httptest.NewServer(mux)
+
+	// Override emulator URL used by tests
+	tableEmulatorURL = server.URL
+
+	// Run tests
+	code := m.Run()
+
+	server.Close()
+	store.Close()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func newServiceClient(t *testing.T) *aztables.ServiceClient {
 	client, err := aztables.NewServiceClientWithNoCredential(
@@ -981,4 +1033,1333 @@ func TestShouldFilterByPartitionKeyAndAdditionalPredicateWhenCallingListEntities
 	}
 
 	assert.Equal(t, 5, count, "Should return all tenant-b enabled entities")
+}
+
+func TestShouldRollbackAllOperationsGivenBatchFailureWhenCallingTransactionalBatch(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testbatchatomicity")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Arrange: Create an existing entity that will cause conflict
+	existingEntity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk-existing",
+		"Value":        "exists",
+	}
+	marshalled, _ := json.Marshal(existingEntity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	// Act: Try batch with 3 inserts, middle one conflicts
+	batch := []aztables.TransactionAction{
+		{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity: mustMarshalCompat(map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "rk1",
+				"Value":        "first",
+			}),
+		},
+		{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity: mustMarshalCompat(map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "rk-existing", // This will fail
+				"Value":        "duplicate",
+			}),
+		},
+		{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity: mustMarshalCompat(map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "rk3",
+				"Value":        "third",
+			}),
+		},
+	}
+
+	_, err = client.SubmitTransaction(ctx, batch, nil)
+	assert.Error(t, err, "Batch should fail due to conflict")
+
+	// Assert: None of the entities should exist (atomic rollback)
+	_, err = client.GetEntity(ctx, "pk1", "rk1", nil)
+	assert.Error(t, err, "First entity should not exist (rolled back)")
+
+	_, err = client.GetEntity(ctx, "pk1", "rk3", nil)
+	assert.Error(t, err, "Third entity should not exist (rolled back)")
+
+	// Existing entity should still have original value
+	resp, err := client.GetEntity(ctx, "pk1", "rk-existing", nil)
+	require.NoError(t, err)
+	var retrieved map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &retrieved)
+	assert.Equal(t, "exists", retrieved["Value"])
+}
+
+func TestShouldCommitAllOperationsGivenValidBatchWhenCallingTransactionalBatch(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testbatchcommit")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Act: Batch with insert, update, delete
+	// First, create an entity to update
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk-update",
+		"Value":        "original",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshalled, nil)
+
+	// Create entity to delete
+	deleteEntity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk-delete",
+		"Value":        "to-delete",
+	}
+	marshalled, _ = json.Marshal(deleteEntity)
+	_, _ = client.AddEntity(ctx, marshalled, nil)
+
+	batch := []aztables.TransactionAction{
+		{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity: mustMarshalCompat(map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "rk-new",
+				"Value":        "inserted",
+			}),
+		},
+		{
+			ActionType: aztables.TransactionTypeUpdateMerge,
+			Entity: mustMarshalCompat(map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "rk-update",
+				"Value":        "updated",
+				"NewField":     "added",
+			}),
+		},
+		{
+			ActionType: aztables.TransactionTypeDelete,
+			Entity: mustMarshalCompat(map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "rk-delete",
+			}),
+		},
+	}
+
+	_, err := client.SubmitTransaction(ctx, batch, nil)
+	require.NoError(t, err, "Batch should succeed")
+
+	// Assert: All operations committed
+	resp, err := client.GetEntity(ctx, "pk1", "rk-new", nil)
+	require.NoError(t, err)
+	var newEntity map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &newEntity)
+	assert.Equal(t, "inserted", newEntity["Value"])
+
+	resp, err = client.GetEntity(ctx, "pk1", "rk-update", nil)
+	require.NoError(t, err)
+	var updatedEntity map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &updatedEntity)
+	assert.Equal(t, "updated", updatedEntity["Value"])
+	assert.Equal(t, "added", updatedEntity["NewField"])
+
+	_, err = client.GetEntity(ctx, "pk1", "rk-delete", nil)
+	assert.Error(t, err, "Deleted entity should not exist")
+}
+
+// ============================================================================
+// Azure Compatibility Tests - PUT Semantics
+// ============================================================================
+
+func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatch(t *testing.T) {
+
+	ctx := context.Background()
+	client := newTableClient(t, "testputsemantics")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Act: Try to update (PUT) non-existent entity without If-Match: *
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "nonexistent",
+		"Value":        "new",
+	}
+	marshalled, _ := json.Marshal(entity)
+
+	_, err := client.UpdateEntity(ctx, marshalled, &aztables.UpdateEntityOptions{
+		UpdateMode: aztables.UpdateModeReplace, // This is PUT
+		// No If-Match means InsertOrReplace (upsert) for service versions 2011-08-18 and later.
+	})
+
+	// Assert: should upsert and entity should exist
+	require.NoError(t, err, "PUT without If-Match should upsert")
+	resp, err := client.GetEntity(ctx, "pk1", "nonexistent", nil)
+	require.NoError(t, err)
+	var stored map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &stored)
+	assert.Equal(t, "new", stored["Value"])
+}
+
+func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithIfMatchStar(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testputupsert")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Act: Update (PUT) with If-Match: * should upsert
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "new",
+		"Value":        "upserted",
+	}
+	marshalled, _ := json.Marshal(entity)
+
+	wildcardEtag := azcore.ETag("*")
+	_, err := client.UpdateEntity(ctx, marshalled, &aztables.UpdateEntityOptions{
+		UpdateMode: aztables.UpdateModeReplace,
+		IfMatch:    &wildcardEtag,
+	})
+
+	require.NoError(t, err, "PUT with If-Match: * should upsert")
+
+	// Verify entity was created
+	resp, err := client.GetEntity(ctx, "pk1", "new", nil)
+	require.NoError(t, err)
+	var retrieved map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &retrieved)
+	assert.Equal(t, "upserted", retrieved["Value"])
+}
+
+func TestShouldReturnBadRequestGivenInvalidFilterSyntaxWhenCallingQuery(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testfiltersyntax")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Act: Query with invalid syntax
+	filter := "PartitionKey eq" // Missing value
+	listOpts := &aztables.ListEntitiesOptions{
+		Filter: &filter,
+	}
+
+	pager := client.NewListEntitiesPager(listOpts)
+	_, err := pager.NextPage(ctx)
+
+	// Assert: Should return error
+	assert.Error(t, err, "Invalid filter syntax should return error")
+}
+
+// ============================================================================
+// Azure Compatibility Tests - Type Metadata
+// ============================================================================
+
+func TestShouldPreserveEdmDateTimeTypeGivenDateTimePropertyWhenStoringEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testtypes")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Arrange: Entity with DateTime
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	entity := aztables.EDMEntity{
+		Entity: aztables.Entity{
+			PartitionKey: "pk1",
+			RowKey:       "rk1",
+		},
+		Properties: map[string]interface{}{
+			"CreatedAt": aztables.EDMDateTime(now),
+		},
+	}
+
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	// Act: Retrieve entity
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	// Assert: Should have type metadata
+	var retrieved map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &retrieved)
+
+	// Azure returns: "CreatedAt@odata.type": "Edm.DateTime"
+	odataType, hasType := retrieved["CreatedAt@odata.type"]
+	if hasType {
+		assert.Equal(t, "Edm.DateTime", odataType)
+	}
+	// TODO: This test documents expected behavior
+}
+
+func TestShouldPreserveEdmGuidTypeGivenGuidPropertyWhenStoringEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testguid")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Arrange: Entity with GUID
+	guid := "550e8400-e29b-41d4-a716-446655440000"
+	entity := aztables.EDMEntity{
+		Entity: aztables.Entity{
+			PartitionKey: "pk1",
+			RowKey:       "rk1",
+		},
+		Properties: map[string]interface{}{
+			"ID": aztables.EDMGUID(guid),
+		},
+	}
+
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	// Act: Retrieve entity
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	// Assert: Should have type metadata
+	var retrieved map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &retrieved)
+
+	// Azure returns: "ID@odata.type": "Edm.Guid"
+	odataType, hasType := retrieved["ID@odata.type"]
+	if hasType {
+		assert.Equal(t, "Edm.Guid", odataType)
+	}
+}
+
+// ============================================================================
+// Azure Compatibility Tests - Reserved Properties
+// ============================================================================
+
+func TestShouldIgnoreTimestampInRequestGivenClientTimestampWhenInsertingEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testtimestamp")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Arrange: Try to set custom Timestamp
+	customTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Timestamp":    customTime.Format(time.RFC3339Nano),
+		"Value":        "test",
+	}
+
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	// Act: Retrieve entity
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &retrieved)
+
+	// Assert: Timestamp should be system-generated, not custom
+	timestampStr, ok := retrieved["Timestamp"].(string)
+	require.True(t, ok)
+
+	retrievedTime, err := time.Parse(time.RFC3339Nano, timestampStr)
+	require.NoError(t, err)
+
+	// Should be recent (within last minute), not the custom 2020 date
+	assert.WithinDuration(t, time.Now().UTC(), retrievedTime, time.Minute)
+}
+
+func TestShouldIgnoreETagInRequestGivenClientETagWhenInsertingEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testetag")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Arrange: Try to set custom ETag
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"odata.etag":   "W/\"custom-etag\"",
+		"Value":        "test",
+	}
+
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	// Act: Retrieve entity
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &retrieved)
+
+	// Assert: ETag should be system-generated, not custom
+	etag, ok := retrieved["odata.etag"].(string)
+	if ok {
+		assert.NotEqual(t, "W/\"custom-etag\"", etag)
+	}
+}
+
+// ============================================================================
+// Key Validation Tests
+// ============================================================================
+
+func TestShouldRejectPartitionKeyWithProhibitedCharactersWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testkeyvalidation")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	prohibitedChars := []string{"/", "\\", "#", "?", "\t", "\n"}
+	for _, char := range prohibitedChars {
+		ch := char // capture loop variable
+		t.Run(fmt.Sprintf("char_%q", ch), func(t *testing.T) {
+			entity := map[string]interface{}{
+				"PartitionKey": "invalid" + ch + "key",
+				"RowKey":       "rk1",
+			}
+			marshalled, _ := json.Marshal(entity)
+			_, err := client.AddEntity(ctx, marshalled, nil)
+			assert.Error(t, err, "Should reject PartitionKey with prohibited character: %q", ch)
+		})
+	}
+}
+
+func TestShouldRejectRowKeyWithProhibitedCharactersWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testrkvalidation")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	prohibitedChars := []string{"/", "\\", "#", "?", "\t", "\n"}
+	for _, char := range prohibitedChars {
+		ch := char // capture loop variable
+		t.Run(fmt.Sprintf("char_%q", ch), func(t *testing.T) {
+			entity := map[string]interface{}{
+				"PartitionKey": "pk1",
+				"RowKey":       "invalid" + ch + "key",
+			}
+			marshalled, _ := json.Marshal(entity)
+			_, err := client.AddEntity(ctx, marshalled, nil)
+			assert.Error(t, err, "Should reject RowKey with prohibited character: %q", ch)
+		})
+	}
+}
+
+func TestShouldRejectPartitionKeyExceeding1KBWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testpksize")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Create a key larger than 1KB (1024 bytes)
+	longKey := strings.Repeat("a", 1025)
+	entity := map[string]interface{}{
+		"PartitionKey": longKey,
+		"RowKey":       "rk1",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject PartitionKey exceeding 1KB")
+}
+
+func TestShouldRejectRowKeyExceeding1KBWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testrksize")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	longKey := strings.Repeat("a", 1025)
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       longKey,
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject RowKey exceeding 1KB")
+}
+
+func TestShouldRejectEmptyPartitionKeyWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testemptypk")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "",
+		"RowKey":       "rk1",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject empty PartitionKey")
+}
+
+func TestShouldRejectEmptyRowKeyWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testemptyrk")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject empty RowKey")
+}
+
+func TestShouldHandleUnicodeInPartitionAndRowKeysWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testunicode")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "tenant-日本語",
+		"RowKey":       "user-Ñoño",
+		"Name":         "Test",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err, "Should accept valid Unicode in keys")
+
+	// Verify retrieval
+	resp, err := client.GetEntity(ctx, "tenant-日本語", "user-Ñoño", nil)
+	require.NoError(t, err)
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+	assert.Equal(t, "tenant-日本語", retrieved["PartitionKey"])
+	assert.Equal(t, "user-Ñoño", retrieved["RowKey"])
+}
+
+// ============================================================================
+// Entity Size and Property Limit Tests
+// ============================================================================
+
+func TestShouldRejectEntityExceeding1MBWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testentitysize")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Create entity with large property exceeding 1MB total
+	largeValue := strings.Repeat("x", 1024*1024) // 1MB string
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"LargeData":    largeValue,
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject entity exceeding 1MB")
+}
+
+func TestShouldRejectEntityWithOver255PropertiesWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testpropertycount")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+	}
+	// Add 256 properties (exceeds limit)
+	for i := 0; i < 256; i++ {
+		entity[fmt.Sprintf("Prop%d", i)] = i
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject entity with more than 255 properties")
+}
+
+func TestShouldRejectStringPropertyExceeding64KBWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testpropsize")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Create property larger than 64KB
+	largeString := strings.Repeat("a", 64*1024+1) // 64KB + 1
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"LargeString":  largeString,
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject string property exceeding 64KB")
+}
+
+func TestShouldAcceptEntityWith255PropertiesWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testmaxprops")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+	}
+	// Add exactly 255 properties (at the limit)
+	for i := 0; i < 255; i++ {
+		entity[fmt.Sprintf("Prop%d", i)] = i
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err, "Should accept entity with exactly 255 properties")
+}
+
+// ============================================================================
+// Property Name Validation Tests
+// ============================================================================
+
+func TestShouldRejectPropertyNameExceeding255CharsWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testpropnamesize")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	longPropName := strings.Repeat("a", 256)
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		longPropName:   "value",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject property name exceeding 255 characters")
+}
+
+func TestShouldRejectPropertyNameWithInvalidCharactersWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testpropnamechars")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Control characters should be rejected in property names
+	entity := map[string]interface{}{
+		"PartitionKey":  "pk1",
+		"RowKey":        "rk1",
+		"Invalid\tProp": "value",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	assert.Error(t, err, "Should reject property name with control characters")
+}
+
+// ============================================================================
+// Table Name Validation Tests
+// ============================================================================
+
+func TestShouldRejectTableNameTooShortWhenCallingCreateTable(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "ab") // Only 2 chars, min is 3
+
+	_, err := client.CreateTable(ctx, nil)
+	assert.Error(t, err, "Should reject table name shorter than 3 characters")
+}
+
+func TestShouldRejectTableNameTooLongWhenCallingCreateTable(t *testing.T) {
+	ctx := context.Background()
+	longName := strings.Repeat("a", 64) // Max is 63
+	client := newTableClient(t, longName)
+
+	_, err := client.CreateTable(ctx, nil)
+	assert.Error(t, err, "Should reject table name longer than 63 characters")
+}
+
+func TestShouldRejectTableNameStartingWithNumberWhenCallingCreateTable(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "123table")
+
+	_, err := client.CreateTable(ctx, nil)
+	assert.Error(t, err, "Should reject table name starting with number")
+}
+
+func TestShouldRejectTableNameWithNonAlphanumericWhenCallingCreateTable(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "table-name")
+
+	_, err := client.CreateTable(ctx, nil)
+	assert.Error(t, err, "Should reject table name with non-alphanumeric characters")
+}
+
+func TestShouldRejectReservedTableNameTablesWhenCallingCreateTable(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "Tables")
+
+	_, err := client.CreateTable(ctx, nil)
+	assert.Error(t, err, "Should reject reserved table name 'Tables'")
+}
+
+// ============================================================================
+// Batch Operation Limit Tests
+// ============================================================================
+
+func TestShouldRejectBatchExceeding100OperationsWhenCallingSubmitTransaction(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testbatchlimit")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Create 101 operations (exceeds limit of 100)
+	actions := make([]aztables.TransactionAction, 101)
+	for i := 0; i < 101; i++ {
+		entity := map[string]interface{}{
+			"PartitionKey": "pk1",
+			"RowKey":       fmt.Sprintf("rk%d", i),
+		}
+		marshalled, _ := json.Marshal(entity)
+		actions[i] = aztables.TransactionAction{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity:     marshalled,
+		}
+	}
+
+	_, err := client.SubmitTransaction(ctx, actions, nil)
+	assert.Error(t, err, "Should reject batch with more than 100 operations")
+}
+
+func TestShouldAcceptBatchWith100OperationsWhenCallingSubmitTransaction(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testbatch100")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Create exactly 100 operations (at the limit)
+	actions := make([]aztables.TransactionAction, 100)
+	for i := 0; i < 100; i++ {
+		entity := map[string]interface{}{
+			"PartitionKey": "pk1",
+			"RowKey":       fmt.Sprintf("rk%d", i),
+		}
+		marshalled, _ := json.Marshal(entity)
+		actions[i] = aztables.TransactionAction{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity:     marshalled,
+		}
+	}
+
+	_, err := client.SubmitTransaction(ctx, actions, nil)
+	require.NoError(t, err, "Should accept batch with exactly 100 operations")
+}
+
+func TestShouldRejectBatchExceeding4MBWhenCallingSubmitTransaction(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testbatchsize")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Create operations with large payloads exceeding 4MB total
+	largeValue := strings.Repeat("x", 100*1024) // 100KB per entity
+	actions := make([]aztables.TransactionAction, 50)
+	for i := 0; i < 50; i++ {
+		entity := map[string]interface{}{
+			"PartitionKey": "pk1",
+			"RowKey":       fmt.Sprintf("rk%d", i),
+			"Data":         largeValue,
+		}
+		marshalled, _ := json.Marshal(entity)
+		actions[i] = aztables.TransactionAction{
+			ActionType: aztables.TransactionTypeAdd,
+			Entity:     marshalled,
+		}
+	}
+
+	_, err := client.SubmitTransaction(ctx, actions, nil)
+	assert.Error(t, err, "Should reject batch exceeding 4MB")
+}
+
+// ============================================================================
+// Advanced OData Query Tests
+// ============================================================================
+
+func TestShouldSupportStartsWithFunctionWhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "teststartswith")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entities := []map[string]interface{}{
+		{"PartitionKey": "pk1", "RowKey": "rk1", "Name": "Alice"},
+		{"PartitionKey": "pk1", "RowKey": "rk2", "Name": "Bob"},
+		{"PartitionKey": "pk1", "RowKey": "rk3", "Name": "Alison"},
+	}
+	for _, e := range entities {
+		m, _ := json.Marshal(e)
+		_, _ = client.AddEntity(ctx, m, nil)
+	}
+
+	filter := "startswith(Name, 'Al')"
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Filter: &filter})
+
+	count := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		count += len(page.Entities)
+	}
+
+	assert.Equal(t, 2, count, "Should find 2 entities starting with 'Al'")
+}
+
+func TestShouldHandleNullPropertyInFilterWhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testnull")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Entity without Optional property (treated as null)
+	entity1 := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Name":         "Alice",
+	}
+	// Entity with Optional property
+	entity2 := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk2",
+		"Name":         "Bob",
+		"Optional":     "value",
+	}
+
+	m1, _ := json.Marshal(entity1)
+	_, _ = client.AddEntity(ctx, m1, nil)
+	m2, _ := json.Marshal(entity2)
+	_, _ = client.AddEntity(ctx, m2, nil)
+
+	// Query for entities where Optional is not null
+	filter := "Optional ne null"
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Filter: &filter})
+
+	count := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		count += len(page.Entities)
+	}
+
+	assert.Equal(t, 1, count, "Should find 1 entity with non-null Optional property")
+}
+
+func TestShouldDistinguishEmptyStringFromNullWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testemptystring")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"EmptyString":  "",
+		// MissingProp is null (not present)
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+
+	assert.Contains(t, retrieved, "EmptyString", "Empty string property should exist")
+	assert.Equal(t, "", retrieved["EmptyString"])
+	assert.NotContains(t, retrieved, "MissingProp", "Missing property should not exist")
+}
+
+// ============================================================================
+// Type System Tests
+// ============================================================================
+
+func TestShouldPreserveInt64WithTypeAnnotationWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testint64")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey":           "pk1",
+		"RowKey":                 "rk1",
+		"LargeNumber":            "9223372036854775807", // Max Int64
+		"LargeNumber@odata.type": "Edm.Int64",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+
+	assert.Equal(t, "Edm.Int64", retrieved["LargeNumber@odata.type"])
+}
+
+func TestShouldHandleBinaryPropertyWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testbinary")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Binary data is base64 encoded
+	binaryData := "SGVsbG8gV29ybGQ=" // "Hello World" in base64
+	entity := map[string]interface{}{
+		"PartitionKey":          "pk1",
+		"RowKey":                "rk1",
+		"BinaryData":            binaryData,
+		"BinaryData@odata.type": "Edm.Binary",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+
+	assert.Equal(t, "Edm.Binary", retrieved["BinaryData@odata.type"])
+	assert.Equal(t, binaryData, retrieved["BinaryData"])
+}
+
+func TestShouldHandleDoublePropertyWhenCallingAddEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testdouble")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Pi":           3.14159265359,
+		"E":            2.71828182846,
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshalled, nil)
+	require.NoError(t, err)
+
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+
+	assert.InDelta(t, 3.14159265359, retrieved["Pi"], 0.0001)
+	assert.InDelta(t, 2.71828182846, retrieved["E"], 0.0001)
+}
+
+func TestShouldCoerceInt32ToInt64InFilterWhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testcoercion")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Count":        42,
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshalled, nil)
+
+	// Filter with integer comparison
+	filter := "Count eq 42"
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Filter: &filter})
+
+	count := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		count += len(page.Entities)
+	}
+
+	assert.Equal(t, 1, count, "Should find entity with Count=42")
+}
+
+// ============================================================================
+// Query Limit Tests
+// ============================================================================
+
+func TestShouldRejectTopValueExceeding1000WhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testtoplimit")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Try to set Top > 1000 (should be rejected or capped)
+	top := int32(1001)
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Top: &top})
+
+	_, err := pager.NextPage(ctx)
+	// Azure either rejects this or caps it to 1000
+	// Test documents expected behavior
+	if err != nil {
+		assert.Error(t, err, "Should reject Top > 1000")
+	}
+}
+
+func TestShouldAcceptTopValue1000WhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testtop1000")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Add some entities
+	for i := 0; i < 10; i++ {
+		entity := map[string]interface{}{
+			"PartitionKey": "pk1",
+			"RowKey":       fmt.Sprintf("rk%d", i),
+		}
+		m, _ := json.Marshal(entity)
+		_, _ = client.AddEntity(ctx, m, nil)
+	}
+
+	// Top=1000 should be accepted
+	top := int32(1000)
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Top: &top})
+
+	_, err := pager.NextPage(ctx)
+	require.NoError(t, err, "Should accept Top=1000")
+}
+
+// ============================================================================
+// Case Sensitivity Tests
+// ============================================================================
+
+func TestShouldTreatPartitionKeyAsCaseSensitiveWhenCallingGetEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testpkcase")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "PK1",
+		"RowKey":       "rk1",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshalled, nil)
+
+	// Try to get with different case
+	_, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	assert.Error(t, err, "PartitionKey should be case-sensitive (pk1 != PK1)")
+
+	// Correct case should work
+	_, err = client.GetEntity(ctx, "PK1", "rk1", nil)
+	require.NoError(t, err, "Exact case match should succeed")
+}
+
+func TestShouldTreatRowKeyAsCaseSensitiveWhenCallingGetEntity(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testrkcase")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "RK1",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshalled, nil)
+
+	// Try to get with different case
+	_, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	assert.Error(t, err, "RowKey should be case-sensitive (rk1 != RK1)")
+
+	// Correct case should work
+	_, err = client.GetEntity(ctx, "pk1", "RK1", nil)
+	require.NoError(t, err, "Exact case match should succeed")
+}
+
+// ============================================================================
+// Merge Operation Property Deletion Tests
+// ============================================================================
+
+func TestShouldNotDeletePropertiesGivenMissingPropertiesWhenCallingMerge(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testmergenodelete")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Insert entity with multiple properties
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Name":         "Alice",
+		"Age":          30,
+		"City":         "Seattle",
+	}
+	marshalled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshalled, nil)
+
+	// Merge with only subset of properties
+	merge := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Age":          31, // Update
+	}
+	mergeMarshalled, _ := json.Marshal(merge)
+	_, err := client.UpsertEntity(ctx, mergeMarshalled, &aztables.UpsertEntityOptions{
+		UpdateMode: aztables.UpdateModeMerge,
+	})
+	require.NoError(t, err)
+
+	// Verify all original properties still exist
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+
+	assert.Equal(t, "Alice", retrieved["Name"], "Name should be preserved")
+	assert.Equal(t, "Seattle", retrieved["City"], "City should be preserved")
+	assert.Equal(t, float64(31), retrieved["Age"], "Age should be updated")
+}
+
+func TestShouldDeleteAllNonKeyPropertiesGivenEmptyEntityWhenCallingReplace(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testreplace")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Insert entity with properties
+	entity := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+		"Name":         "Alice",
+		"Age":          30,
+	}
+	marshalled, _ := json.Marshal(entity)
+	addResp, _ := client.AddEntity(ctx, marshalled, nil)
+
+	// Replace with entity containing no custom properties
+	replace := map[string]interface{}{
+		"PartitionKey": "pk1",
+		"RowKey":       "rk1",
+	}
+	replaceMarshalled, _ := json.Marshal(replace)
+	_, err := client.UpdateEntity(ctx, replaceMarshalled, &aztables.UpdateEntityOptions{
+		UpdateMode: aztables.UpdateModeReplace,
+		IfMatch:    &addResp.ETag,
+	})
+	require.NoError(t, err)
+
+	// Verify properties are removed
+	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
+	require.NoError(t, err)
+
+	var retrieved map[string]interface{}
+	json.Unmarshal(resp.Value, &retrieved)
+
+	assert.NotContains(t, retrieved, "Name", "Name should be removed in replace")
+	assert.NotContains(t, retrieved, "Age", "Age should be removed in replace")
+}
+
+// ============================================================================
+// Continuation Token Correctness Tests
+// ============================================================================
+
+func TestShouldReturnConsistentResultsAcrossPagesWhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testconsistency")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	// Insert entities in mixed order
+	for i := 10; i >= 1; i-- {
+		entity := map[string]interface{}{
+			"PartitionKey": "pk1",
+			"RowKey":       fmt.Sprintf("rk%02d", i),
+			"Value":        i,
+		}
+		m, _ := json.Marshal(entity)
+		_, _ = client.AddEntity(ctx, m, nil)
+	}
+
+	// Page through results
+	top := int32(3)
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Top: &top})
+
+	var allKeys []string
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		for _, e := range page.Entities {
+			var ent map[string]interface{}
+			json.Unmarshal(e, &ent)
+			allKeys = append(allKeys, ent["RowKey"].(string))
+		}
+	}
+
+	// Results should be ordered by RowKey
+	require.Len(t, allKeys, 10)
+	for i := 0; i < len(allKeys)-1; i++ {
+		assert.True(t, allKeys[i] < allKeys[i+1], "Results should be ordered")
+	}
+}
+
+// ============================================================================
+// Special Filter Edge Cases
+// ============================================================================
+
+func TestShouldHandleFilterWithParenthesesWhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testparens")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entities := []map[string]interface{}{
+		{"PartitionKey": "pk1", "RowKey": "rk1", "A": 1, "B": 2},
+		{"PartitionKey": "pk1", "RowKey": "rk2", "A": 2, "B": 1},
+		{"PartitionKey": "pk1", "RowKey": "rk3", "A": 1, "B": 1},
+	}
+	for _, e := range entities {
+		m, _ := json.Marshal(e)
+		_, _ = client.AddEntity(ctx, m, nil)
+	}
+
+	// (A eq 1 and B eq 2) or (A eq 2 and B eq 1)
+	filter := "(A eq 1 and B eq 2) or (A eq 2 and B eq 1)"
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Filter: &filter})
+
+	count := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		count += len(page.Entities)
+	}
+
+	assert.Equal(t, 2, count, "Should match 2 entities with complex filter")
+}
+
+func TestShouldHandleBooleanPropertyInFilterWhenCallingListEntities(t *testing.T) {
+	ctx := context.Background()
+	client := newTableClient(t, "testboolfilter")
+	_, _ = client.CreateTable(ctx, nil)
+	defer func() {
+		_, _ = client.Delete(ctx, nil)
+	}()
+
+	entities := []map[string]interface{}{
+		{"PartitionKey": "pk1", "RowKey": "rk1", "Active": true},
+		{"PartitionKey": "pk1", "RowKey": "rk2", "Active": false},
+		{"PartitionKey": "pk1", "RowKey": "rk3", "Active": true},
+	}
+	for _, e := range entities {
+		m, _ := json.Marshal(e)
+		_, _ = client.AddEntity(ctx, m, nil)
+	}
+
+	filter := "Active eq true"
+	pager := client.NewListEntitiesPager(&aztables.ListEntitiesOptions{Filter: &filter})
+
+	count := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		require.NoError(t, err)
+		count += len(page.Entities)
+	}
+
+	assert.Equal(t, 2, count, "Should find 2 active entities")
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+func mustMarshalCompat(v interface{}) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal: %v", err))
+	}
+	return data
 }

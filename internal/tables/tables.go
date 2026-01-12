@@ -180,6 +180,11 @@ func (h *Handler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("creating table", "table", req.TableName)
 
 	if err := h.store.CreateTable(ctx, req.TableName); err != nil {
+		if err == ErrInvalidTableName {
+			h.log.Debug("invalid table name", "table", req.TableName)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid table name")
+			return
+		}
 		if err == ErrTableExists {
 			h.log.Debug("table already exists", "table", req.TableName)
 			h.writeError(w, http.StatusConflict, "TableAlreadyExists", "Table already exists")
@@ -248,7 +253,7 @@ func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, p
 	entity, err := table.GetEntity(ctx, pk, rk)
 	if err != nil {
 		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
 		h.log.Error("failed to get entity", "table", tableName, "error", err)
@@ -293,6 +298,11 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 			h.writeError(w, http.StatusConflict, "EntityAlreadyExists", "Entity already exists")
 			return
 		}
+		if err == ErrInvalidEntity {
+			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
+			return
+		}
 		h.log.Error("failed to insert entity", "table", tableName, "error", err)
 		h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 		return
@@ -329,9 +339,14 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 	existing, getErr := table.GetEntity(ctx, pk, rk)
 	switch {
 	case getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*"):
-		// Upsert: insert when not found and no specific ETag required.
+		// Upsert: insert when not found and If-Match is missing or *.
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
+			if err == ErrInvalidEntity {
+				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
+				return
+			}
 			h.log.Error("failed to insert entity for upsert", "table", tableName, "error", err)
 			h.writeError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 			return
@@ -339,8 +354,8 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		h.log.Info("entity upserted (inserted)", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
 	case getErr == ErrEntityNotFound:
-		// Entity doesn't exist but specific ETag is required.
-		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+		// Entity doesn't exist and no wildcard ETag - fail with 404.
+		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 		return
 
 	case getErr != nil:
@@ -353,12 +368,17 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		entity, err = table.UpdateEntityWithETag(ctx, pk, rk, data, false, ifMatch)
 		if err != nil {
 			if err == ErrEntityNotFound {
-				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 				return
 			}
 			if err == ErrPreconditionFailed {
 				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 					"The update condition specified in the request was not satisfied")
+				return
+			}
+			if err == ErrInvalidEntity {
+				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 				return
 			}
 			h.log.Error("failed to update entity", "table", tableName, "error", err)
@@ -401,12 +421,17 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 
 	if err != nil {
 		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
 		if err == ErrPreconditionFailed {
 			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 				"The update condition specified in the request was not satisfied")
+			return
+		}
+		if err == ErrInvalidEntity {
+			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
+			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 			return
 		}
 		h.log.Error("failed to merge entity", "table", tableName, "error", err)
@@ -434,7 +459,7 @@ func (h *Handler) DeleteEntity(w http.ResponseWriter, r *http.Request, tableName
 	err = table.DeleteEntityWithETag(ctx, pk, rk, ifMatch)
 	if err != nil {
 		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
 		if err == ErrPreconditionFailed {

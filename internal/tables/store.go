@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/fgrzl/fazure/internal/common"
 )
-
-// ───────────────────────────────────────────────────────────────────────────────
-// Entity model
-// ───────────────────────────────────────────────────────────────────────────────
 
 // Entity represents a table entity with metadata.
 type Entity struct {
@@ -35,6 +32,21 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 
 	for k, v := range e.Properties {
 		m[k] = v
+
+		// Add type metadata for special types
+		switch v.(type) {
+		case time.Time:
+			m[k+"@odata.type"] = "Edm.DateTime"
+			// Format as ISO 8601
+			if t, ok := v.(time.Time); ok {
+				m[k] = t.Format(time.RFC3339Nano)
+			}
+		}
+
+		// Check for type hints in property name
+		if typeHint, hasType := e.Properties[k+"@odata.type"].(string); hasType {
+			m[k+"@odata.type"] = typeHint
+		}
 	}
 
 	return json.Marshal(m)
@@ -71,6 +83,34 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	e.Properties = make(map[string]interface{}, len(m))
 	for k, v := range m {
 		if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "ETag" {
+			// Preserve type metadata (properties ending with @odata.type)
+			if strings.HasSuffix(k, "@odata.type") {
+				e.Properties[k] = v
+				continue
+			}
+
+			// Check if there's a type annotation for this property
+			if typeHint, ok := m[k+"@odata.type"].(string); ok {
+				switch typeHint {
+				case "Edm.DateTime":
+					// Try to parse as datetime
+					if str, ok := v.(string); ok {
+						if t, err := time.Parse(time.RFC3339Nano, str); err == nil {
+							e.Properties[k] = t
+							e.Properties[k+"@odata.type"] = typeHint
+							continue
+						} else if t, err := time.Parse(time.RFC3339, str); err == nil {
+							e.Properties[k] = t
+							e.Properties[k+"@odata.type"] = typeHint
+							continue
+						}
+					}
+				case "Edm.Guid", "Edm.Int64", "Edm.Binary":
+					// Preserve type hint
+					e.Properties[k+"@odata.type"] = typeHint
+				}
+			}
+
 			e.Properties[k] = v
 		}
 	}
@@ -78,11 +118,11 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 // Pebble key encoding
 // Layout: tables/data/<table>\x00<partitionKey>\x00<rowKey>
 // This preserves table, PK, RK ordering and works well with prefix/range scans.
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 
 const (
 	metaPrefix      = "tables/meta/"
@@ -93,6 +133,20 @@ const (
 // metaKey(tableName) => tables/meta/<table>
 func metaKey(tableName string) []byte {
 	return []byte(metaPrefix + tableName)
+}
+
+// filterReservedProperties removes system-managed properties from user input.
+// Azure Table Storage ignores these properties when sent by clients.
+func filterReservedProperties(properties map[string]interface{}) map[string]interface{} {
+	filtered := make(map[string]interface{}, len(properties))
+	for k, v := range properties {
+		// Skip reserved properties
+		if k == "Timestamp" || k == "ETag" || k == "odata.etag" || k == "@odata.etag" {
+			continue
+		}
+		filtered[k] = v
+	}
+	return filtered
 }
 
 // dataKey(table, pk, rk) => tables/data/<table>\x00<pk>\x00<rk>
@@ -153,9 +207,9 @@ func upperBoundForPrefix(prefix []byte) []byte {
 	return upper
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 // TableStore
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 
 // TableStore manages tables and entities.
 type TableStore struct {
@@ -210,8 +264,32 @@ func (ts *TableStore) ListTables(ctx context.Context) ([]map[string]string, erro
 	return tables, iter.Error()
 }
 
+func validateTableName(tableName string) error {
+	if len(tableName) < 3 || len(tableName) > 63 {
+		return ErrInvalidTableName
+	}
+	// Must start with a letter
+	first := tableName[0]
+	if (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
+		return ErrInvalidTableName
+	}
+	for i := 0; i < len(tableName); i++ {
+		c := tableName[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return ErrInvalidTableName
+		}
+	}
+	if strings.EqualFold(tableName, "Tables") {
+		return ErrInvalidTableName
+	}
+	return nil
+}
+
 // CreateTable creates a new table.
 func (ts *TableStore) CreateTable(ctx context.Context, tableName string) error {
+	if err := validateTableName(tableName); err != nil {
+		return err
+	}
 	db := ts.store.DB()
 	key := metaKey(tableName)
 
@@ -288,9 +366,9 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	return batch.Commit(pebble.NoSync)
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 // Table
-// ───────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 
 // Table represents a table handle.
 type Table struct {
@@ -327,8 +405,94 @@ func (ts *TableStore) GetTable(ctx context.Context, tableName string) (*Table, e
 	}, nil
 }
 
+// keyValidation helpers
+func validateKey(name, v string) error {
+	if v == "" {
+		return ErrInvalidEntity
+	}
+	if len(v) > 1024 {
+		return ErrInvalidEntity
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '/' || c == '\\' || c == '#' || c == '?' || c == '\t' || c == '\n' || c < 0x20 {
+			return ErrInvalidEntity
+		}
+	}
+	return nil
+}
+
+func validatePropertyName(n string) error {
+	if len(n) > 255 {
+		return ErrInvalidEntity
+	}
+	for i := 0; i < len(n); i++ {
+		c := n[i]
+		if c < 0x20 {
+			return ErrInvalidEntity
+		}
+	}
+	return nil
+}
+
+func validateProperties(props map[string]interface{}) error {
+	if props == nil {
+		return nil
+	}
+	count := 0
+	for k, v := range props {
+		if k == "PartitionKey" || k == "RowKey" {
+			continue
+		}
+		if strings.HasSuffix(k, "@odata.type") {
+			// type annotations don't count as separate properties
+			continue
+		}
+		count++
+		if err := validatePropertyName(k); err != nil {
+			return err
+		}
+		// check string property sizes
+		switch vv := v.(type) {
+		case string:
+			if len(vv) > 64*1024 {
+				return ErrInvalidEntity
+			}
+		}
+	}
+	if count > 255 {
+		return ErrInvalidEntity
+	}
+	return nil
+}
+
+func validateEntitySize(e *Entity) error {
+	// Marshal to compute size
+	b, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	if len(b) > 1*1024*1024 {
+		return ErrInvalidEntity
+	}
+	return nil
+}
+
 // InsertEntity inserts a new entity (fails if exists).
 func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}) (*Entity, error) {
+	// validate keys
+	if err := validateKey("PartitionKey", partitionKey); err != nil {
+		return nil, err
+	}
+	if err := validateKey("RowKey", rowKey); err != nil {
+		return nil, err
+	}
+
+	// validate properties
+	if err := validateProperties(properties); err != nil {
+		return nil, err
+	}
+
 	db := t.store.DB()
 	key := dataKey(t.name, partitionKey, rowKey)
 
@@ -341,11 +505,14 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		return nil, err
 	}
 
+	// Filter out reserved properties - these are system-managed
+	filteredProps := filterReservedProperties(properties)
+
 	entity := &Entity{
 		PartitionKey: partitionKey,
 		RowKey:       rowKey,
 		Timestamp:    time.Now().UTC(),
-		Properties:   properties,
+		Properties:   filteredProps,
 		ETag:         "", // Will be set after initial marshal
 	}
 
@@ -436,24 +603,31 @@ func (t *Table) UpdateEntityWithETag(
 		return nil, ErrPreconditionFailed
 	}
 
+	// Filter reserved properties
+	filteredProps := filterReservedProperties(properties)
+
 	if merge {
 		if entity.Properties == nil {
 			entity.Properties = make(map[string]interface{})
 		}
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
 	} else {
-		entity.Properties = make(map[string]interface{}, len(properties))
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		entity.Properties = make(map[string]interface{}, len(filteredProps))
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
 	}
 
+	// Validate properties and entity size before persisting
+	if err := validateProperties(entity.Properties); err != nil {
+		return nil, err
+	}
 	entity.Timestamp = time.Now().UTC()
 	entity.ETag = "" // Reset for consistent ETag computation
 
@@ -461,6 +635,10 @@ func (t *Table) UpdateEntityWithETag(
 	data, err = json.Marshal(&entity)
 	if err != nil {
 		return nil, err
+	}
+	// check size limit
+	if len(data) > 1*1024*1024 {
+		return nil, ErrInvalidEntity
 	}
 	entity.ETag = common.GenerateETag(data)
 
@@ -504,24 +682,31 @@ func (t *Table) UpsertEntity(
 		return nil, err
 	}
 
+	// Filter reserved properties
+	filteredProps := filterReservedProperties(properties)
+
 	if merge {
 		if entity.Properties == nil {
 			entity.Properties = make(map[string]interface{})
 		}
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
 	} else {
-		entity.Properties = make(map[string]interface{}, len(properties))
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		entity.Properties = make(map[string]interface{}, len(filteredProps))
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
 	}
 
+	// Validate properties and entity size
+	if err := validateProperties(entity.Properties); err != nil {
+		return nil, err
+	}
 	entity.Timestamp = time.Now().UTC()
 	entity.ETag = "" // Reset for consistent ETag computation
 
@@ -529,6 +714,9 @@ func (t *Table) UpsertEntity(
 	marshaledData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
+	}
+	if len(marshaledData) > 1*1024*1024 {
+		return nil, ErrInvalidEntity
 	}
 	entity.ETag = common.GenerateETag(marshaledData)
 
@@ -652,6 +840,20 @@ func (t *Table) QueryEntities(
 	}()
 
 	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
+	// Validate filter syntax upfront before iteration
+	// This ensures we catch invalid filters even on empty tables
+	if filter != "" {
+		// Test the filter with an empty entity to validate syntax
+		testEntity := map[string]interface{}{
+			"PartitionKey": "",
+			"RowKey":       "",
+		}
+		if _, testErr := MatchesFilter(filter, testEntity); testErr != nil {
+			err = testErr
+			return
+		}
+	}
+
 	pkHint = partitionKeyFilter
 	rowKeyHint := extractRowKeyHint(filter)
 

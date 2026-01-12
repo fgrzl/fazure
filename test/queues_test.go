@@ -449,6 +449,8 @@ func TestShouldDeleteQueueGivenExistingQueueWhenCallingDelete(t *testing.T) {
 func TestShouldIncrementDequeueCountGivenMultipleDequeuedWhenCallingDequeue(t *testing.T) {
 	ctx := context.Background()
 	qClient := newQueueClient(t, "dequeue-count")
+	// Ensure a clean slate so the test is deterministic
+	_, _ = qClient.Delete(ctx, nil)
 	_, _ = qClient.Create(ctx, nil)
 	defer qClient.Delete(ctx, nil)
 

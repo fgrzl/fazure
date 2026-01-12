@@ -41,6 +41,28 @@ func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
 	// Simplified filter parser - handles basic equality and logical operators
 	filter = strings.TrimSpace(filter)
 
+	// Strip surrounding parentheses if they enclose the whole expression
+	if strings.HasPrefix(filter, "(") && strings.HasSuffix(filter, ")") {
+		// check balance
+		depth := 0
+		balanced := true
+		for i := 0; i < len(filter); i++ {
+			c := filter[i]
+			if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth == 0 && i != len(filter)-1 {
+					balanced = false
+					break
+				}
+			}
+		}
+		if balanced {
+			return MatchesFilter(strings.TrimSpace(filter[1:len(filter)-1]), entity)
+		}
+	}
+
 	// Handle 'and' operator (case insensitive)
 	andIndex := findOperatorIndex(filter, " and ")
 	if andIndex >= 0 {
@@ -75,16 +97,57 @@ func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
 }
 
 // findOperatorIndex finds the index of an operator (case insensitive)
+// It skips operators that are inside parentheses.
+// The operator can be provided with or without surrounding spaces; this function
+// tolerates either and ensures the operator is matched as a standalone token.
 func findOperatorIndex(s, op string) int {
 	lower := strings.ToLower(s)
 	lowerOp := strings.ToLower(op)
-	return strings.Index(lower, lowerOp)
+	opLen := len(lowerOp)
+	depth := 0
+	for i := 0; i <= len(lower)-opLen; i++ {
+		c := lower[i]
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && i+opLen <= len(lower) && lower[i:i+opLen] == lowerOp {
+			// Determine surrounding character constraints.
+			// If the operator string starts/ends with a space, skip checking that side
+			beforeOK := true
+			afterOK := true
+			if !strings.HasPrefix(lowerOp, " ") {
+				beforeOK = i == 0 || isSeparator(lower[i-1])
+			}
+			if !strings.HasSuffix(lowerOp, " ") {
+				afterOK = i+opLen == len(lower) || isSeparator(lower[i+opLen])
+			}
+			if beforeOK && afterOK {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func isSeparator(c byte) bool {
+	return c == ' ' || c == '(' || c == ')'
 }
 
 // evaluateSimpleFilter evaluates a single filter expression.
 // Returns ErrInvalidFilter when no supported operator is found.
 func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, error) {
 	filter = strings.TrimSpace(filter)
+
+	// Handle supported OData string functions
+	// Example: startswith(Name, 'Al')
+	if ok, matched, err := evaluateStringFunctionFilter(filter, entity); ok {
+		return matched, err
+	}
 
 	// Handle comparison operators: eq, ne, lt, le, gt, ge
 	operators := []struct {
@@ -105,6 +168,11 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 			left := strings.TrimSpace(filter[:idx])
 			right := strings.TrimSpace(filter[idx+len(op.op)+2:])
 
+			// Validate left and right are not empty
+			if left == "" || right == "" {
+				return false, fmt.Errorf("incomplete filter expression: %q: %w", filter, ErrInvalidFilter)
+			}
+
 			if strings.HasPrefix(right, "'") && strings.HasSuffix(right, "'") {
 				right = right[1 : len(right)-1]
 			}
@@ -119,6 +187,102 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 	}
 
 	return false, fmt.Errorf("unsupported or invalid filter expression: %q: %w", filter, ErrInvalidFilter)
+}
+
+func evaluateStringFunctionFilter(filter string, entity map[string]interface{}) (ok bool, matched bool, err error) {
+	lower := strings.ToLower(strings.TrimSpace(filter))
+	if !strings.HasPrefix(lower, "startswith(") {
+		return false, false, nil
+	}
+
+	filter = strings.TrimSpace(filter)
+	if !strings.HasSuffix(filter, ")") {
+		return true, false, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	argsStr := strings.TrimSpace(filter[len("startswith(") : len(filter)-1])
+	args, parseErr := splitODataFunctionArgs(argsStr)
+	if parseErr != nil {
+		return true, false, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
+	}
+	if len(args) != 2 {
+		return true, false, fmt.Errorf("invalid startswith arguments: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	property := strings.TrimSpace(args[0])
+	if property == "" {
+		return true, false, fmt.Errorf("invalid startswith property: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	prefixLiteral := strings.TrimSpace(args[1])
+	prefix, okLit := parseSingleQuotedString(prefixLiteral)
+	if !okLit {
+		return true, false, fmt.Errorf("invalid startswith prefix: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	val, okVal := entity[property]
+	if !okVal {
+		return true, false, nil
+	}
+
+	valStr := fmt.Sprintf("%v", val)
+	return true, strings.HasPrefix(valStr, prefix), nil
+}
+
+func splitODataFunctionArgs(s string) ([]string, error) {
+	var args []string
+	depth := 0
+	inString := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\'':
+			// OData string escaping uses doubled single quotes inside the literal.
+			if inString {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inString = false
+			} else {
+				inString = true
+			}
+		case '(':
+			if !inString {
+				depth++
+			}
+		case ')':
+			if !inString {
+				if depth == 0 {
+					return nil, fmt.Errorf("unbalanced parentheses")
+				}
+				depth--
+			}
+		case ',':
+			if !inString && depth == 0 {
+				args = append(args, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	if inString || depth != 0 {
+		return nil, fmt.Errorf("unterminated string or unbalanced parentheses")
+	}
+
+	args = append(args, strings.TrimSpace(s[start:]))
+	return args, nil
+}
+
+func parseSingleQuotedString(s string) (string, bool) {
+	if len(s) < 2 || !strings.HasPrefix(s, "'") || !strings.HasSuffix(s, "'") {
+		return "", false
+	}
+	inner := s[1 : len(s)-1]
+	// OData escapes single quotes by doubling them.
+	inner = strings.ReplaceAll(inner, "''", "'")
+	return inner, true
 }
 
 // compareValues compares two values, handling type conversion

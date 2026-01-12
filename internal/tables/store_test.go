@@ -192,6 +192,22 @@ func TestShouldInsertEntityGivenValidData(t *testing.T) {
 	assert.Equal(t, "Alice", entity.Properties["Name"])
 }
 
+func TestInsertEntityWithInvalidCharactersShouldFail(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	err := store.CreateTable(ctx, "testtable")
+	require.NoError(t, err)
+	table, err := store.GetTable(ctx, "testtable")
+	require.NoError(t, err)
+
+	_, err = table.InsertEntity(ctx, "inva/lid", "rk1", map[string]interface{}{"Value": "x"})
+	assert.Error(t, err)
+
+	_, err = table.InsertEntity(ctx, "pk1", "inva\tlid", map[string]interface{}{"Value": "x"})
+	assert.Error(t, err)
+}
+
 func TestShouldReturnErrorGivenDuplicateEntityKey(t *testing.T) {
 	// Arrange
 	store, cleanup := setupTestStore(t)
