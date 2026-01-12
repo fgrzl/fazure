@@ -1180,8 +1180,7 @@ func TestShouldCommitAllOperationsGivenValidBatchWhenCallingTransactionalBatch(t
 // Azure Compatibility Tests - PUT Semantics
 // ============================================================================
 
-func TestShouldFailGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatchStar(t *testing.T) {
-	t.Skip("Azure SDK UpdateEntity behavior: may upsert even without If-Match: *")
+func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatch(t *testing.T) {
 
 	ctx := context.Background()
 	client := newTableClient(t, "testputsemantics")
@@ -1200,13 +1199,16 @@ func TestShouldFailGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatchSt
 
 	_, err := client.UpdateEntity(ctx, marshalled, &aztables.UpdateEntityOptions{
 		UpdateMode: aztables.UpdateModeReplace, // This is PUT
-		// No If-Match means it should fail if entity doesn't exist
+		// No If-Match means InsertOrReplace (upsert) for service versions 2011-08-18 and later.
 	})
 
-	// Assert: Should fail with 404
-	require.Error(t, err, "PUT without If-Match should fail on non-existent entity")
-	// Check it's actually a 404
-	assert.Contains(t, err.Error(), "404")
+	// Assert: should upsert and entity should exist
+	require.NoError(t, err, "PUT without If-Match should upsert")
+	resp, err := client.GetEntity(ctx, "pk1", "nonexistent", nil)
+	require.NoError(t, err)
+	var stored map[string]interface{}
+	_ = json.Unmarshal(resp.Value, &stored)
+	assert.Equal(t, "new", stored["Value"])
 }
 
 func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithIfMatchStar(t *testing.T) {
@@ -1870,8 +1872,6 @@ func TestShouldRejectBatchExceeding4MBWhenCallingSubmitTransaction(t *testing.T)
 // ============================================================================
 
 func TestShouldSupportStartsWithFunctionWhenCallingListEntities(t *testing.T) {
-	t.Skip("startswith function not yet implemented")
-
 	ctx := context.Background()
 	client := newTableClient(t, "teststartswith")
 	_, _ = client.CreateTable(ctx, nil)

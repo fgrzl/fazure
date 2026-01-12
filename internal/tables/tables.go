@@ -338,8 +338,8 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 
 	existing, getErr := table.GetEntity(ctx, pk, rk)
 	switch {
-	case getErr == ErrEntityNotFound && ifMatch == "*":
-		// Upsert: insert when not found and If-Match is *.
+	case getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*"):
+		// Upsert: insert when not found and If-Match is missing or *.
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
 			if err == ErrInvalidEntity {

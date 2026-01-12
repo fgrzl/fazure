@@ -143,6 +143,12 @@ func isSeparator(c byte) bool {
 func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, error) {
 	filter = strings.TrimSpace(filter)
 
+	// Handle supported OData string functions
+	// Example: startswith(Name, 'Al')
+	if ok, matched, err := evaluateStringFunctionFilter(filter, entity); ok {
+		return matched, err
+	}
+
 	// Handle comparison operators: eq, ne, lt, le, gt, ge
 	operators := []struct {
 		op   string
@@ -181,6 +187,102 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 	}
 
 	return false, fmt.Errorf("unsupported or invalid filter expression: %q: %w", filter, ErrInvalidFilter)
+}
+
+func evaluateStringFunctionFilter(filter string, entity map[string]interface{}) (ok bool, matched bool, err error) {
+	lower := strings.ToLower(strings.TrimSpace(filter))
+	if !strings.HasPrefix(lower, "startswith(") {
+		return false, false, nil
+	}
+
+	filter = strings.TrimSpace(filter)
+	if !strings.HasSuffix(filter, ")") {
+		return true, false, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	argsStr := strings.TrimSpace(filter[len("startswith(") : len(filter)-1])
+	args, parseErr := splitODataFunctionArgs(argsStr)
+	if parseErr != nil {
+		return true, false, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
+	}
+	if len(args) != 2 {
+		return true, false, fmt.Errorf("invalid startswith arguments: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	property := strings.TrimSpace(args[0])
+	if property == "" {
+		return true, false, fmt.Errorf("invalid startswith property: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	prefixLiteral := strings.TrimSpace(args[1])
+	prefix, okLit := parseSingleQuotedString(prefixLiteral)
+	if !okLit {
+		return true, false, fmt.Errorf("invalid startswith prefix: %q: %w", filter, ErrInvalidFilter)
+	}
+
+	val, okVal := entity[property]
+	if !okVal {
+		return true, false, nil
+	}
+
+	valStr := fmt.Sprintf("%v", val)
+	return true, strings.HasPrefix(valStr, prefix), nil
+}
+
+func splitODataFunctionArgs(s string) ([]string, error) {
+	var args []string
+	depth := 0
+	inString := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\'':
+			// OData string escaping uses doubled single quotes inside the literal.
+			if inString {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inString = false
+			} else {
+				inString = true
+			}
+		case '(':
+			if !inString {
+				depth++
+			}
+		case ')':
+			if !inString {
+				if depth == 0 {
+					return nil, fmt.Errorf("unbalanced parentheses")
+				}
+				depth--
+			}
+		case ',':
+			if !inString && depth == 0 {
+				args = append(args, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	if inString || depth != 0 {
+		return nil, fmt.Errorf("unterminated string or unbalanced parentheses")
+	}
+
+	args = append(args, strings.TrimSpace(s[start:]))
+	return args, nil
+}
+
+func parseSingleQuotedString(s string) (string, bool) {
+	if len(s) < 2 || !strings.HasPrefix(s, "'") || !strings.HasSuffix(s, "'") {
+		return "", false
+	}
+	inner := s[1 : len(s)-1]
+	// OData escapes single quotes by doubling them.
+	inner = strings.ReplaceAll(inner, "''", "'")
+	return inner, true
 }
 
 // compareValues compares two values, handling type conversion
