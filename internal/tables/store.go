@@ -34,13 +34,11 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 		m[k] = v
 
 		// Add type metadata for special types
-		switch v.(type) {
+		switch val := v.(type) {
 		case time.Time:
 			m[k+"@odata.type"] = "Edm.DateTime"
 			// Format as ISO 8601
-			if t, ok := v.(time.Time); ok {
-				m[k] = t.Format(time.RFC3339Nano)
-			}
+			m[k] = val.Format(time.RFC3339Nano)
 		}
 
 		// Check for type hints in property name
@@ -298,7 +296,7 @@ func (ts *TableStore) CreateTable(ctx context.Context, tableName string) error {
 		closer.Close()
 		return ErrTableExists
 	}
-	if err != nil && err != pebble.ErrNotFound {
+	if err != pebble.ErrNotFound {
 		return err
 	}
 
@@ -406,7 +404,7 @@ func (ts *TableStore) GetTable(ctx context.Context, tableName string) (*Table, e
 }
 
 // keyValidation helpers
-func validateKey(name, v string) error {
+func validateKey(v string) error {
 	if v == "" {
 		return ErrInvalidEntity
 	}
@@ -466,12 +464,7 @@ func validateProperties(props map[string]interface{}) error {
 	return nil
 }
 
-func validateEntitySize(e *Entity) error {
-	// Marshal to compute size
-	b, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
+func validateEntitySize(b []byte) error {
 	if len(b) > 1*1024*1024 {
 		return ErrInvalidEntity
 	}
@@ -481,10 +474,10 @@ func validateEntitySize(e *Entity) error {
 // InsertEntity inserts a new entity (fails if exists).
 func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, properties map[string]interface{}) (*Entity, error) {
 	// validate keys
-	if err := validateKey("PartitionKey", partitionKey); err != nil {
+	if err := validateKey(partitionKey); err != nil {
 		return nil, err
 	}
-	if err := validateKey("RowKey", rowKey); err != nil {
+	if err := validateKey(rowKey); err != nil {
 		return nil, err
 	}
 
@@ -501,7 +494,7 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		closer.Close()
 		return nil, ErrEntityExists
 	}
-	if err != nil && err != pebble.ErrNotFound {
+	if err != pebble.ErrNotFound {
 		return nil, err
 	}
 
@@ -521,15 +514,19 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 	if err != nil {
 		return nil, err
 	}
+	// Validate total entity size (before ETag is assigned)
+	if err := validateEntitySize(data); err != nil {
+		return nil, err
+	}
 	entity.ETag = common.GenerateETag(data)
 
 	// Marshal again with ETag included
-	data, err = json.Marshal(entity)
+	finalData, err := json.Marshal(entity)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := db.Set(key, data, pebble.NoSync); err != nil {
+	if err := db.Set(key, finalData, pebble.NoSync); err != nil {
 		return nil, err
 	}
 
@@ -636,19 +633,19 @@ func (t *Table) UpdateEntityWithETag(
 	if err != nil {
 		return nil, err
 	}
-	// check size limit
-	if len(data) > 1*1024*1024 {
-		return nil, ErrInvalidEntity
+	// Validate total entity size (before ETag is assigned)
+	if err := validateEntitySize(data); err != nil {
+		return nil, err
 	}
 	entity.ETag = common.GenerateETag(data)
 
 	// Marshal again with ETag included
-	data, err = json.Marshal(&entity)
+	finalData, err := json.Marshal(&entity)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := db.Set(key, data, pebble.NoSync); err != nil {
+	if err := db.Set(key, finalData, pebble.NoSync); err != nil {
 		return nil, err
 	}
 
@@ -715,8 +712,9 @@ func (t *Table) UpsertEntity(
 	if err != nil {
 		return nil, err
 	}
-	if len(marshaledData) > 1*1024*1024 {
-		return nil, ErrInvalidEntity
+	// Validate total entity size (before ETag is assigned)
+	if err := validateEntitySize(marshaledData); err != nil {
+		return nil, err
 	}
 	entity.ETag = common.GenerateETag(marshaledData)
 
