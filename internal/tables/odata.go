@@ -105,6 +105,11 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 			left := strings.TrimSpace(filter[:idx])
 			right := strings.TrimSpace(filter[idx+len(op.op)+2:])
 
+			// Validate left and right are not empty
+			if left == "" || right == "" {
+				return false, fmt.Errorf("incomplete filter expression: %q: %w", filter, ErrInvalidFilter)
+			}
+
 			if strings.HasPrefix(right, "'") && strings.HasSuffix(right, "'") {
 				right = right[1 : len(right)-1]
 			}

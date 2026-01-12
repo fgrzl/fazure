@@ -248,7 +248,7 @@ func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, p
 	entity, err := table.GetEntity(ctx, pk, rk)
 	if err != nil {
 		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
 		h.log.Error("failed to get entity", "table", tableName, "error", err)
@@ -328,8 +328,8 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 
 	existing, getErr := table.GetEntity(ctx, pk, rk)
 	switch {
-	case getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*"):
-		// Upsert: insert when not found and no specific ETag required.
+	case getErr == ErrEntityNotFound && ifMatch == "*":
+		// Upsert: insert when not found and If-Match is *.
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
 			h.log.Error("failed to insert entity for upsert", "table", tableName, "error", err)
@@ -339,8 +339,8 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		h.log.Info("entity upserted (inserted)", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
 	case getErr == ErrEntityNotFound:
-		// Entity doesn't exist but specific ETag is required.
-		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+		// Entity doesn't exist and no wildcard ETag - fail with 404.
+		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 		return
 
 	case getErr != nil:
@@ -353,7 +353,7 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		entity, err = table.UpdateEntityWithETag(ctx, pk, rk, data, false, ifMatch)
 		if err != nil {
 			if err == ErrEntityNotFound {
-				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 				return
 			}
 			if err == ErrPreconditionFailed {
@@ -401,7 +401,7 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 
 	if err != nil {
 		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
 		if err == ErrPreconditionFailed {
@@ -434,7 +434,7 @@ func (h *Handler) DeleteEntity(w http.ResponseWriter, r *http.Request, tableName
 	err = table.DeleteEntityWithETag(ctx, pk, rk, ifMatch)
 	if err != nil {
 		if err == ErrEntityNotFound {
-			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "Entity not found")
+			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
 		if err == ErrPreconditionFailed {

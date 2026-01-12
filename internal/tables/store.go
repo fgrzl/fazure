@@ -1,19 +1,20 @@
-package tables
+﻿package tables
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/fgrzl/fazure/internal/common"
 )
 
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Entity model
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Entity represents a table entity with metadata.
 type Entity struct {
@@ -35,6 +36,21 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 
 	for k, v := range e.Properties {
 		m[k] = v
+
+		// Add type metadata for special types
+		switch v.(type) {
+		case time.Time:
+			m[k+"@odata.type"] = "Edm.DateTime"
+			// Format as ISO 8601
+			if t, ok := v.(time.Time); ok {
+				m[k] = t.Format(time.RFC3339Nano)
+			}
+		}
+
+		// Check for type hints in property name
+		if typeHint, hasType := e.Properties[k+"@odata.type"].(string); hasType {
+			m[k+"@odata.type"] = typeHint
+		}
 	}
 
 	return json.Marshal(m)
@@ -71,6 +87,34 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	e.Properties = make(map[string]interface{}, len(m))
 	for k, v := range m {
 		if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "ETag" {
+			// Preserve type metadata (properties ending with @odata.type)
+			if strings.HasSuffix(k, "@odata.type") {
+				e.Properties[k] = v
+				continue
+			}
+
+			// Check if there's a type annotation for this property
+			if typeHint, ok := m[k+"@odata.type"].(string); ok {
+				switch typeHint {
+				case "Edm.DateTime":
+					// Try to parse as datetime
+					if str, ok := v.(string); ok {
+						if t, err := time.Parse(time.RFC3339Nano, str); err == nil {
+							e.Properties[k] = t
+							e.Properties[k+"@odata.type"] = typeHint
+							continue
+						} else if t, err := time.Parse(time.RFC3339, str); err == nil {
+							e.Properties[k] = t
+							e.Properties[k+"@odata.type"] = typeHint
+							continue
+						}
+					}
+				case "Edm.Guid", "Edm.Int64", "Edm.Binary":
+					// Preserve type hint
+					e.Properties[k+"@odata.type"] = typeHint
+				}
+			}
+
 			e.Properties[k] = v
 		}
 	}
@@ -78,11 +122,11 @@ func (e *Entity) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Pebble key encoding
 // Layout: tables/data/<table>\x00<partitionKey>\x00<rowKey>
 // This preserves table, PK, RK ordering and works well with prefix/range scans.
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const (
 	metaPrefix      = "tables/meta/"
@@ -93,6 +137,20 @@ const (
 // metaKey(tableName) => tables/meta/<table>
 func metaKey(tableName string) []byte {
 	return []byte(metaPrefix + tableName)
+}
+
+// filterReservedProperties removes system-managed properties from user input.
+// Azure Table Storage ignores these properties when sent by clients.
+func filterReservedProperties(properties map[string]interface{}) map[string]interface{} {
+	filtered := make(map[string]interface{}, len(properties))
+	for k, v := range properties {
+		// Skip reserved properties
+		if k == "Timestamp" || k == "ETag" || k == "odata.etag" || k == "@odata.etag" {
+			continue
+		}
+		filtered[k] = v
+	}
+	return filtered
 }
 
 // dataKey(table, pk, rk) => tables/data/<table>\x00<pk>\x00<rk>
@@ -153,9 +211,9 @@ func upperBoundForPrefix(prefix []byte) []byte {
 	return upper
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // TableStore
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // TableStore manages tables and entities.
 type TableStore struct {
@@ -288,9 +346,9 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	return batch.Commit(pebble.NoSync)
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Table
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Table represents a table handle.
 type Table struct {
@@ -341,11 +399,14 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 		return nil, err
 	}
 
+	// Filter out reserved properties - these are system-managed
+	filteredProps := filterReservedProperties(properties)
+
 	entity := &Entity{
 		PartitionKey: partitionKey,
 		RowKey:       rowKey,
 		Timestamp:    time.Now().UTC(),
-		Properties:   properties,
+		Properties:   filteredProps,
 		ETag:         "", // Will be set after initial marshal
 	}
 
@@ -436,19 +497,22 @@ func (t *Table) UpdateEntityWithETag(
 		return nil, ErrPreconditionFailed
 	}
 
+	// Filter reserved properties
+	filteredProps := filterReservedProperties(properties)
+
 	if merge {
 		if entity.Properties == nil {
 			entity.Properties = make(map[string]interface{})
 		}
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
 	} else {
-		entity.Properties = make(map[string]interface{}, len(properties))
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		entity.Properties = make(map[string]interface{}, len(filteredProps))
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
@@ -504,19 +568,22 @@ func (t *Table) UpsertEntity(
 		return nil, err
 	}
 
+	// Filter reserved properties
+	filteredProps := filterReservedProperties(properties)
+
 	if merge {
 		if entity.Properties == nil {
 			entity.Properties = make(map[string]interface{})
 		}
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
 	} else {
-		entity.Properties = make(map[string]interface{}, len(properties))
-		for k, v := range properties {
-			if k != "PartitionKey" && k != "RowKey" && k != "Timestamp" && k != "odata.etag" {
+		entity.Properties = make(map[string]interface{}, len(filteredProps))
+		for k, v := range filteredProps {
+			if k != "PartitionKey" && k != "RowKey" {
 				entity.Properties[k] = v
 			}
 		}
@@ -652,6 +719,20 @@ func (t *Table) QueryEntities(
 	}()
 
 	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
+// Validate filter syntax upfront before iteration
+// This ensures we catch invalid filters even on empty tables
+if filter != "" {
+// Test the filter with an empty entity to validate syntax
+testEntity := map[string]interface{}{
+"PartitionKey": "",
+"RowKey":       "",
+}
+if _, testErr := MatchesFilter(filter, testEntity); testErr != nil {
+err = testErr
+return
+}
+}
+
 	pkHint = partitionKeyFilter
 	rowKeyHint := extractRowKeyHint(filter)
 
