@@ -7,7 +7,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/data/aztables v1.4.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.4
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue v1.0.1
-	github.com/cockroachdb/pebble/v2 v2.1.3
+	github.com/cockroachdb/pebble/v2 v2.1.4
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
 )
@@ -15,7 +15,7 @@ require (
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
 	github.com/DataDog/zstd v1.5.7 // indirect
-	github.com/RaduBerinde/axisds v0.0.0-20250419182453-5135a0650657 // indirect
+	github.com/RaduBerinde/axisds v0.1.0 // indirect
 	github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
