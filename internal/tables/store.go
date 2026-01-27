@@ -837,7 +837,6 @@ func (t *Table) QueryEntities(
 		}
 	}()
 
-	partitionKeyFilter := extractPartitionKeyFromFilter(filter)
 	// Validate filter syntax upfront before iteration
 	// This ensures we catch invalid filters even on empty tables
 	if filter != "" {
@@ -852,39 +851,41 @@ func (t *Table) QueryEntities(
 		}
 	}
 
-	pkHint = partitionKeyFilter
+	partitionKeyHint := extractPartitionKeyHint(filter)
 	rowKeyHint := extractRowKeyHint(filter)
+	pkHint = partitionKeyHint.Exact
 
 	var (
 		lowerBound []byte
 		upperBound []byte
 	)
 
-	if partitionKeyFilter != "" {
-		prefix := partitionPrefix(t.name, partitionKeyFilter)
+	if partitionKeyHint.Exact != "" {
+		// Exact match optimization: PartitionKey eq 'value'
+		prefix := partitionPrefix(t.name, partitionKeyHint.Exact)
 		lowerBound = prefix
 		upperBound = upperBoundForPrefix(prefix)
 
 		// If we have RowKey range hints within this partition, refine the bounds
 		if rowKeyHint.Exact != "" {
 			// Exact RowKey: narrow to single entity
-			lowerBound = dataKey(t.name, partitionKeyFilter, rowKeyHint.Exact)
-			upperBound = dataKey(t.name, partitionKeyFilter, rowKeyHint.Exact+"\x00")
+			lowerBound = dataKey(t.name, partitionKeyHint.Exact, rowKeyHint.Exact)
+			upperBound = dataKey(t.name, partitionKeyHint.Exact, rowKeyHint.Exact+"\x00")
 		} else if rowKeyHint.UseRange {
 			// RowKey range: set bounds within partition
 			if rowKeyHint.RangeStart != "" {
-				lowerBound = dataKey(t.name, partitionKeyFilter, rowKeyHint.RangeStart)
+				lowerBound = dataKey(t.name, partitionKeyHint.Exact, rowKeyHint.RangeStart)
 			}
 			if rowKeyHint.RangeEnd != "" {
 				// For RowKey le/lt, we need to include up to and possibly including the end key
 				// Using upperBoundForPrefix on the end key's prefix
-				endKey := dataKey(t.name, partitionKeyFilter, rowKeyHint.RangeEnd)
+				endKey := dataKey(t.name, partitionKeyHint.Exact, rowKeyHint.RangeEnd)
 				upperBound = upperBoundForPrefix(endKey)
 			}
 		}
 
-		t.log.Debug("query using partition prefix",
-			"partitionKey", partitionKeyFilter,
+		t.log.Debug("query using exact partition",
+			"partitionKey", partitionKeyHint.Exact,
 			"prefix", string(prefix),
 			"filter", filter,
 			"top", top,
@@ -892,14 +893,20 @@ func (t *Table) QueryEntities(
 			"rowKeyHint", rowKeyHint.UseRange || rowKeyHint.Exact != "",
 		)
 	} else {
+		// Full table scan for range queries or no partition filter
 		fullScan = true
 		prefix := tablePrefix(t.name)
 		lowerBound = prefix
 		upperBound = upperBoundForPrefix(prefix)
 
 		if filter != "" {
-			scanReason = "filter not partition-restricted"
-			t.log.Warn("query falling back to full table scan",
+			if partitionKeyHint.UseRange {
+				scanReason = "partition key range query"
+			} else {
+				scanReason = "filter not partition-restricted"
+			}
+			t.log.Debug("query using table scan",
+				"table", t.name,
 				"reason", scanReason,
 				"filter", filter,
 				"top", top,
