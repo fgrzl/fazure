@@ -610,16 +610,17 @@ func TestShouldConvertIntToFloat64(t *testing.T) {
 	assert.Equal(t, float64(42), result)
 }
 
-func TestShouldConvertNumericStringToFloat64(t *testing.T) {
-	// Arrange
+func TestShouldNotConvertNumericStringToFloat64(t *testing.T) {
+	// Arrange - strings should not be converted to numbers
+	// This ensures hex-encoded strings like "00000000000000e9" aren't
+	// incorrectly parsed as scientific notation (0e9)
 	input := "3.14"
 
 	// Act
-	result, ok := toFloat64(input)
+	_, ok := toFloat64(input)
 
-	// Assert
-	assert.True(t, ok)
-	assert.Equal(t, 3.14, result)
+	// Assert - strings should NOT be converted to float64
+	assert.False(t, ok, "String values should not be converted to float64")
 }
 
 func TestShouldReturnFalseGivenNonNumericString(t *testing.T) {

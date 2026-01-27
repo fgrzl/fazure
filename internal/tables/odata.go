@@ -166,15 +166,21 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 		idx := findOperatorIndex(filter, " "+op.op+" ")
 		if idx >= 0 {
 			left := strings.TrimSpace(filter[:idx])
-			right := strings.TrimSpace(filter[idx+len(op.op)+2:])
+			rightStr := strings.TrimSpace(filter[idx+len(op.op)+2:])
 
 			// Validate left and right are not empty
-			if left == "" || right == "" {
+			if left == "" || rightStr == "" {
 				return false, fmt.Errorf("incomplete filter expression: %q: %w", filter, ErrInvalidFilter)
 			}
 
-			if strings.HasPrefix(right, "'") && strings.HasSuffix(right, "'") {
-				right = right[1 : len(right)-1]
+			// Parse the right-side value
+			var right interface{}
+			if strings.HasPrefix(rightStr, "'") && strings.HasSuffix(rightStr, "'") {
+				// Quoted string - remove quotes
+				right = rightStr[1 : len(rightStr)-1]
+			} else {
+				// Unquoted value - try to parse as number
+				right = parseFilterValue(rightStr)
 			}
 
 			val, ok := entity[left]
@@ -325,12 +331,26 @@ func toFloat64(v interface{}) (float64, bool) {
 		return float64(val), true
 	case int32:
 		return float64(val), true
-	case string:
-		if f, err := strconv.ParseFloat(val, 64); err == nil {
-			return f, true
-		}
+		// Removed string parsing case - strings should be compared as strings
+		// not converted to numbers, as this causes issues with hex-encoded values
+		// that contain 'e' and are incorrectly parsed as scientific notation
 	}
 	return 0, false
+}
+
+// parseFilterValue attempts to parse an unquoted filter value as a number.
+// If parsing fails, returns the string as-is.
+func parseFilterValue(s string) interface{} {
+	// Try parsing as int64 first
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i
+	}
+	// Try parsing as float64
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f
+	}
+	// Return as string if not a number
+	return s
 }
 
 // SelectFields returns only selected fields from entity
