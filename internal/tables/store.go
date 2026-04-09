@@ -2,6 +2,7 @@ package tables
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -433,6 +434,48 @@ func validatePropertyName(n string) error {
 	return nil
 }
 
+// utf16CodeUnitCount returns the size of s in UTF-16 code units, matching Azure Table Storage
+// limits for Edm.String (64 KiB UTF-16 → at most 32 Ki code units).
+func utf16CodeUnitCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xffff {
+			n += 2 // surrogate pair
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+const maxPropertyUTF16Units = 32 * 1024
+const maxPropertyBinaryBytes = 64 * 1024
+
+func validatePropertyValue(name string, v interface{}, props map[string]interface{}) error {
+	switch vv := v.(type) {
+	case string:
+		typeHint, _ := props[name+"@odata.type"].(string)
+		if typeHint == "Edm.Binary" {
+			decoded, err := base64.StdEncoding.DecodeString(vv)
+			if err != nil {
+				return ErrInvalidEntity
+			}
+			if len(decoded) > maxPropertyBinaryBytes {
+				return ErrPropertyValueTooLarge
+			}
+			return nil
+		}
+		if utf16CodeUnitCount(vv) > maxPropertyUTF16Units {
+			return ErrPropertyValueTooLarge
+		}
+	case []byte:
+		if len(vv) > maxPropertyBinaryBytes {
+			return ErrPropertyValueTooLarge
+		}
+	}
+	return nil
+}
+
 func validateProperties(props map[string]interface{}) error {
 	if props == nil {
 		return nil
@@ -450,12 +493,8 @@ func validateProperties(props map[string]interface{}) error {
 		if err := validatePropertyName(k); err != nil {
 			return err
 		}
-		// check string property sizes
-		switch vv := v.(type) {
-		case string:
-			if len(vv) > 64*1024 {
-				return ErrInvalidEntity
-			}
+		if err := validatePropertyValue(k, v, props); err != nil {
+			return err
 		}
 	}
 	if count > 255 {

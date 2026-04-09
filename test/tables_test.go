@@ -1622,8 +1622,8 @@ func TestShouldRejectStringPropertyExceeding64KBWhenCallingAddEntity(t *testing.
 		_, _ = client.Delete(ctx, nil)
 	}()
 
-	// Create property larger than 64KB
-	largeString := strings.Repeat("a", 64*1024+1) // 64KB + 1
+	// Azure limits Edm.String to 64KiB UTF-16 (~32K UTF-16 code units); ASCII runes are 1 unit each.
+	largeString := strings.Repeat("a", 64*1024+1)
 	entity := map[string]interface{}{
 		"PartitionKey": "pk1",
 		"RowKey":       "rk1",

@@ -2,11 +2,13 @@ package tables
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,6 +192,67 @@ func TestShouldInsertEntityGivenValidData(t *testing.T) {
 	assert.NotEmpty(t, entity.ETag)
 	assert.False(t, entity.Timestamp.IsZero())
 	assert.Equal(t, "Alice", entity.Properties["Name"])
+}
+
+func TestInsertEntityRejectsStringPropertyOver32KUTF16Units(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	require.NoError(t, store.CreateTable(ctx, "testtable"))
+	table, err := store.GetTable(ctx, "testtable")
+	require.NoError(t, err)
+
+	// 50K ASCII → 50K UTF-16 code units; under old byte-only check (<64KiB UTF-8) but invalid for Azure.
+	_, err = table.InsertEntity(ctx, "pk1", "rk1", map[string]interface{}{
+		"Blob": strings.Repeat("a", 50_000),
+	})
+	assert.ErrorIs(t, err, ErrPropertyValueTooLarge)
+}
+
+func TestInsertEntityAcceptsStringPropertyAt32KUTF16Limit(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	require.NoError(t, store.CreateTable(ctx, "testtable"))
+	table, err := store.GetTable(ctx, "testtable")
+	require.NoError(t, err)
+
+	_, err = table.InsertEntity(ctx, "pk1", "rk1", map[string]interface{}{
+		"Data": strings.Repeat("b", maxPropertyUTF16Units),
+	})
+	require.NoError(t, err)
+}
+
+func TestInsertEntityRejectsEdmBinaryOver64KBDecoded(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	require.NoError(t, store.CreateTable(ctx, "testtable"))
+	table, err := store.GetTable(ctx, "testtable")
+	require.NoError(t, err)
+
+	payload := make([]byte, maxPropertyBinaryBytes+1)
+	_, err = table.InsertEntity(ctx, "pk1", "rk1", map[string]interface{}{
+		"Bin":            base64.StdEncoding.EncodeToString(payload),
+		"Bin@odata.type": "Edm.Binary",
+	})
+	assert.ErrorIs(t, err, ErrPropertyValueTooLarge)
+}
+
+func TestInsertEntityAcceptsEdmBinaryAt64KBDecoded(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	require.NoError(t, store.CreateTable(ctx, "testtable"))
+	table, err := store.GetTable(ctx, "testtable")
+	require.NoError(t, err)
+
+	payload := make([]byte, maxPropertyBinaryBytes)
+	_, err = table.InsertEntity(ctx, "pk1", "rk1", map[string]interface{}{
+		"Bin":            base64.StdEncoding.EncodeToString(payload),
+		"Bin@odata.type": "Edm.Binary",
+	})
+	require.NoError(t, err)
 }
 
 func TestInsertEntityWithInvalidCharactersShouldFail(t *testing.T) {

@@ -298,6 +298,11 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 			h.writeError(w, http.StatusConflict, "EntityAlreadyExists", "Entity already exists")
 			return
 		}
+		if errors.Is(err, ErrPropertyValueTooLarge) {
+			h.writeError(w, http.StatusBadRequest, "PropertyValueTooLarge",
+				"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
+			return
+		}
 		if err == ErrInvalidEntity {
 			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
 			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
@@ -342,6 +347,11 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		// Upsert: insert when not found and If-Match is missing or *.
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
+			if errors.Is(err, ErrPropertyValueTooLarge) {
+				h.writeError(w, http.StatusBadRequest, "PropertyValueTooLarge",
+					"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
+				return
+			}
 			if err == ErrInvalidEntity {
 				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
 				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
@@ -374,6 +384,11 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 			if err == ErrPreconditionFailed {
 				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 					"The update condition specified in the request was not satisfied")
+				return
+			}
+			if errors.Is(err, ErrPropertyValueTooLarge) {
+				h.writeError(w, http.StatusBadRequest, "PropertyValueTooLarge",
+					"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
 				return
 			}
 			if err == ErrInvalidEntity {
@@ -427,6 +442,11 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 		if err == ErrPreconditionFailed {
 			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 				"The update condition specified in the request was not satisfied")
+			return
+		}
+		if errors.Is(err, ErrPropertyValueTooLarge) {
+			h.writeError(w, http.StatusBadRequest, "PropertyValueTooLarge",
+				"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
 			return
 		}
 		if err == ErrInvalidEntity {
@@ -856,6 +876,9 @@ func (h *Handler) writeBatchErrorWithIndex(w http.ResponseWriter, index int, err
 	case ErrEntityNotFound:
 		code = "ResourceNotFound"
 		statusCode = http.StatusNotFound
+	case ErrPropertyValueTooLarge:
+		code = "PropertyValueTooLarge"
+		statusCode = http.StatusBadRequest
 	}
 
 	h.writeBatchError(w, statusCode, code, fmt.Sprintf("Operation %d failed: %s", index, err.Error()))
