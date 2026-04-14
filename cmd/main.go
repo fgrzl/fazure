@@ -89,8 +89,6 @@ func main() {
 				"service", service,
 				"method", r.Method,
 				"path", r.URL.Path,
-				"query", r.URL.RawQuery,
-				"contentLength", r.ContentLength,
 			)
 			next(w, r)
 		}

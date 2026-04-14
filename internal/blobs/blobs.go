@@ -175,7 +175,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // writeError writes an Azure Storage error response
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
-	h.log.Warn("error response",
+	h.log.Debug("error response",
 		"statusCode", statusCode,
 		"errorCode", errorCode,
 		"message", message,
@@ -415,8 +415,6 @@ func (h *Handler) SetServiceProperties(w http.ResponseWriter, r *http.Request) {
 
 // CreateContainer creates a new blob container
 func (h *Handler) CreateContainer(w http.ResponseWriter, r *http.Request, container string) {
-	h.log.Info("creating container", "container", container, "method", r.Method)
-
 	key := h.containerKey(container)
 
 	// Check if container already exists
@@ -448,15 +446,13 @@ func (h *Handler) CreateContainer(w http.ResponseWriter, r *http.Request, contai
 		return
 	}
 
-	h.log.Info("container created", "container", container)
+	h.log.Debug("container created", "container", container)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusCreated)
 }
 
 // DeleteContainer deletes a blob container
 func (h *Handler) DeleteContainer(w http.ResponseWriter, r *http.Request, container string) {
-	h.log.Info("deleting container", "container", container)
-
 	key := h.containerKey(container)
 
 	// Check if container exists and get metadata
@@ -522,7 +518,7 @@ func (h *Handler) DeleteContainer(w http.ResponseWriter, r *http.Request, contai
 		return
 	}
 
-	h.log.Info("container deleted", "container", container)
+	h.log.Debug("container deleted", "container", container)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -564,7 +560,7 @@ func (h *Handler) GetContainerProperties(w http.ResponseWriter, r *http.Request,
 // LeaseContainer handles container lease operations
 func (h *Handler) LeaseContainer(w http.ResponseWriter, r *http.Request, container string) {
 	action := r.Header.Get("x-ms-lease-action")
-	h.log.Info("lease container", "container", container, "action", action)
+	h.log.Debug("lease container", "container", container, "action", action)
 
 	key := h.containerKey(container)
 	data, closer, err := h.db.Get(key)
@@ -746,8 +742,6 @@ func (h *Handler) LeaseContainer(w http.ResponseWriter, r *http.Request, contain
 
 // ListContainers lists all containers
 func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) {
-	h.log.Info("listing containers")
-
 	prefix := []byte("blobs/containers/")
 	iter, err := h.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
@@ -774,7 +768,7 @@ func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) {
 		result.Containers = append(result.Containers, Container{Name: name})
 	}
 
-	h.log.Info("containers listed", "count", len(result.Containers))
+	h.log.Debug("containers listed", "count", len(result.Containers))
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
@@ -787,8 +781,6 @@ func (h *Handler) PutBlob(w http.ResponseWriter, r *http.Request, container, blo
 	if blobType == "" {
 		blobType = "BlockBlob"
 	}
-
-	h.log.Info("uploading blob", "container", container, "blob", blob, "blobType", blobType, "contentLength", r.ContentLength)
 
 	// Check if container exists
 	containerKey := h.containerKey(container)
@@ -889,15 +881,13 @@ func (h *Handler) PutBlob(w http.ResponseWriter, r *http.Request, container, blo
 		return
 	}
 
-	h.log.Info("blob uploaded", "container", container, "blob", blob, "size", len(data), "path", blobPath)
+	h.log.Debug("blob uploaded", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, etag)
 	w.WriteHeader(http.StatusCreated)
 }
 
 // GetBlob downloads a blob
 func (h *Handler) GetBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Debug("downloading blob", "container", container, "blob", blob)
-
 	// Get metadata from Pebble
 	metaKey := h.blobMetaKey(container, blob)
 	metaData, metaCloser, err := h.db.Get(metaKey)
@@ -1046,8 +1036,6 @@ func (h *Handler) GetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 
 // DeleteBlob deletes a blob
 func (h *Handler) DeleteBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("deleting blob", "container", container, "blob", blob)
-
 	metaKey := h.blobMetaKey(container, blob)
 
 	// Get metadata to find the file path
@@ -1097,15 +1085,13 @@ func (h *Handler) DeleteBlob(w http.ResponseWriter, r *http.Request, container, 
 		return
 	}
 
-	h.log.Info("blob deleted", "container", container, "blob", blob)
+	h.log.Debug("blob deleted", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // ListBlobs lists blobs in a container
 func (h *Handler) ListBlobs(w http.ResponseWriter, r *http.Request, container string) {
-	h.log.Debug("listing blobs", "container", container)
-
 	prefixFilter := r.URL.Query().Get("prefix")
 
 	// Check if container exists
@@ -1167,8 +1153,6 @@ func (h *Handler) blockKey(container, blob, blockID string) []byte {
 // PutBlock stages a block for later commit
 func (h *Handler) PutBlock(w http.ResponseWriter, r *http.Request, container, blob string) {
 	blockID := r.URL.Query().Get("blockid")
-	h.log.Info("putting block", "container", container, "blob", blob, "blockId", blockID)
-
 	// Check if container exists
 	containerKey := h.containerKey(container)
 	_, closer, err := h.db.Get(containerKey)
@@ -1196,15 +1180,13 @@ func (h *Handler) PutBlock(w http.ResponseWriter, r *http.Request, container, bl
 		return
 	}
 
-	h.log.Info("block staged", "container", container, "blob", blob, "blockId", blockID, "size", len(data))
+	h.log.Debug("block staged", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusCreated)
 }
 
 // PutBlockList commits staged blocks to create a blob
 func (h *Handler) PutBlockList(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("putting block list", "container", container, "blob", blob)
-
 	// Parse block list from request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1277,7 +1259,7 @@ func (h *Handler) PutBlockList(w http.ResponseWriter, r *http.Request, container
 		h.db.Delete(h.blockKey(container, blob, blockID), pebble.Sync)
 	}
 
-	h.log.Info("block list committed", "container", container, "blob", blob, "size", len(blobData))
+	h.log.Debug("block list committed", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, etag)
 	w.WriteHeader(http.StatusCreated)
 }
@@ -1305,8 +1287,6 @@ func (h *Handler) GetBlockList(w http.ResponseWriter, r *http.Request, container
 
 // SetBlobMetadata sets user-defined metadata on a blob
 func (h *Handler) SetBlobMetadata(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("setting blob metadata", "container", container, "blob", blob)
-
 	// Get existing metadata
 	metaKey := h.blobMetaKey(container, blob)
 	data, closer, err := h.db.Get(metaKey)
@@ -1351,15 +1331,13 @@ func (h *Handler) SetBlobMetadata(w http.ResponseWriter, r *http.Request, contai
 		return
 	}
 
-	h.log.Info("blob metadata set", "container", container, "blob", blob)
+	h.log.Debug("blob metadata set", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, meta.ETag)
 	w.WriteHeader(http.StatusOK)
 }
 
 // SetContainerMetadata sets metadata on a container
 func (h *Handler) SetContainerMetadata(w http.ResponseWriter, r *http.Request, container string) {
-	h.log.Info("setting container metadata", "container", container)
-
 	key := h.containerKey(container)
 	data, closer, err := h.db.Get(key)
 	if err == pebble.ErrNotFound {
@@ -1397,14 +1375,14 @@ func (h *Handler) SetContainerMetadata(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
-	h.log.Info("container metadata set", "container", container)
+	h.log.Debug("container metadata set", "container", container)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusOK)
 }
 
 // SetContainerACL sets the access control list for a container
 func (h *Handler) SetContainerACL(w http.ResponseWriter, r *http.Request, container string) {
-	h.log.Info("setting container ACL", "container", container)
+	h.log.Debug("setting container ACL", "container", container)
 
 	key := h.containerKey(container)
 	data, closer, err := h.db.Get(key)
@@ -1481,7 +1459,7 @@ func (h *Handler) GetContainerACL(w http.ResponseWriter, r *http.Request, contai
 
 // CreateSnapshot creates a snapshot of a blob
 func (h *Handler) CreateSnapshot(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("creating snapshot", "container", container, "blob", blob)
+	h.log.Debug("creating snapshot", "container", container, "blob", blob)
 
 	// Get blob metadata
 	metaKey := h.blobMetaKey(container, blob)
@@ -1510,7 +1488,7 @@ func (h *Handler) CreateSnapshot(w http.ResponseWriter, r *http.Request, contain
 func (h *Handler) LeaseBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
 	leaseAction := r.Header.Get("x-ms-lease-action")
 	leaseDurationHeader := r.Header.Get("x-ms-lease-duration")
-	h.log.Info("lease blob", "container", container, "blob", blob, "action", leaseAction, "duration", leaseDurationHeader)
+	h.log.Debug("lease blob", "container", container, "blob", blob, "action", leaseAction)
 
 	// Get blob metadata
 	metaKey := h.blobMetaKey(container, blob)
@@ -1612,8 +1590,6 @@ func (h *Handler) LeaseBlob(w http.ResponseWriter, r *http.Request, container, b
 // CopyBlob copies a blob from a source URL
 func (h *Handler) CopyBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
 	copySource := r.Header.Get("x-ms-copy-source")
-	h.log.Info("copying blob", "container", container, "blob", blob, "source", copySource)
-
 	// Check if container exists
 	containerKey := h.containerKey(container)
 	_, closer, err := h.db.Get(containerKey)
@@ -1700,7 +1676,7 @@ func (h *Handler) CopyBlob(w http.ResponseWriter, r *http.Request, container, bl
 	}
 
 	copyID := fmt.Sprintf("copy-%d", time.Now().UnixNano())
-	h.log.Info("blob copied", "container", container, "blob", blob)
+	h.log.Debug("blob copied", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, etag)
 	w.Header().Set("x-ms-copy-id", copyID)
 	w.Header().Set("x-ms-copy-status", "success")
@@ -1713,8 +1689,6 @@ func (h *Handler) CopyBlob(w http.ResponseWriter, r *http.Request, container, bl
 
 // createAppendBlob creates a new append blob (empty)
 func (h *Handler) createAppendBlob(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("creating append blob", "container", container, "blob", blob)
-
 	// Create empty file for the append blob
 	blobPath := h.blobFilePath(container, blob)
 	if err := os.MkdirAll(filepath.Dir(blobPath), 0755); err != nil {
@@ -1751,15 +1725,13 @@ func (h *Handler) createAppendBlob(w http.ResponseWriter, r *http.Request, conta
 		return
 	}
 
-	h.log.Info("append blob created", "container", container, "blob", blob)
+	h.log.Debug("append blob created", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, etag)
 	w.WriteHeader(http.StatusCreated)
 }
 
 // AppendBlock appends a block to an append blob
 func (h *Handler) AppendBlock(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("appending block", "container", container, "blob", blob)
-
 	// Get existing blob metadata
 	metaKey := h.blobMetaKey(container, blob)
 	metaData, closer, err := h.db.Get(metaKey)
@@ -1828,7 +1800,7 @@ func (h *Handler) AppendBlock(w http.ResponseWriter, r *http.Request, container,
 		return
 	}
 
-	h.log.Info("block appended", "container", container, "blob", blob, "offset", appendOffset, "blockSize", len(blockData))
+	h.log.Debug("block appended", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, metadata.ETag)
 	w.Header().Set("x-ms-blob-append-offset", strconv.FormatInt(appendOffset, 10))
 	w.Header().Set("x-ms-blob-committed-block-count", strconv.Itoa(metadata.CommittedBlockCount))
@@ -1859,8 +1831,6 @@ func (h *Handler) createPageBlob(w http.ResponseWriter, r *http.Request, contain
 		h.writeError(w, http.StatusBadRequest, "InvalidHeaderValue", "Page blob size must be a multiple of 512 bytes")
 		return
 	}
-
-	h.log.Info("creating page blob", "container", container, "blob", blob, "size", blobContentLength)
 
 	// Create file with zeros
 	blobPath := h.blobFilePath(container, blob)
@@ -1907,7 +1877,7 @@ func (h *Handler) createPageBlob(w http.ResponseWriter, r *http.Request, contain
 		return
 	}
 
-	h.log.Info("page blob created", "container", container, "blob", blob, "size", blobContentLength)
+	h.log.Debug("page blob created", "container", container, "blob", blob)
 	common.SetResponseHeaders(w, etag)
 	w.WriteHeader(http.StatusCreated)
 }
@@ -1920,7 +1890,7 @@ func (h *Handler) PutPage(w http.ResponseWriter, r *http.Request, container, blo
 		rangeHeader = r.Header.Get("Range")
 	}
 
-	h.log.Info("put page", "container", container, "blob", blob, "action", pageWrite, "range", rangeHeader)
+	h.log.Debug("put page", "container", container, "blob", blob, "action", pageWrite)
 
 	// Get existing blob metadata
 	metaKey := h.blobMetaKey(container, blob)
@@ -1994,7 +1964,7 @@ func (h *Handler) PutPage(w http.ResponseWriter, r *http.Request, container, blo
 
 // SetBlobProperties sets properties on a blob (used for page blob resize)
 func (h *Handler) SetBlobProperties(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("setting blob properties", "container", container, "blob", blob)
+	h.log.Debug("setting blob properties", "container", container, "blob", blob)
 
 	// Get existing blob metadata
 	metaKey := h.blobMetaKey(container, blob)
@@ -2060,7 +2030,7 @@ func (h *Handler) SetBlobProperties(w http.ResponseWriter, r *http.Request, cont
 
 // GetPageRanges returns the list of valid page ranges for a page blob
 func (h *Handler) GetPageRanges(w http.ResponseWriter, r *http.Request, container, blob string) {
-	h.log.Info("getting page ranges", "container", container, "blob", blob)
+	h.log.Debug("getting page ranges", "container", container, "blob", blob)
 
 	// Get existing blob metadata
 	metaKey := h.blobMetaKey(container, blob)

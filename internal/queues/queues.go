@@ -165,7 +165,7 @@ func (h *Handler) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // writeError writes an Azure Storage error response
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, errorCode, message string) {
-	h.log.Warn("error response",
+	h.log.Debug("error response",
 		"statusCode", statusCode,
 		"errorCode", errorCode,
 		"message", message,
@@ -195,8 +195,6 @@ func (h *Handler) generatePopReceipt() string {
 
 // CreateQueue creates a new queue
 func (h *Handler) CreateQueue(w http.ResponseWriter, r *http.Request, queue string) {
-	h.log.Info("creating queue", "queue", queue)
-
 	key := h.queueKey(queue)
 
 	// Check if queue already exists
@@ -223,15 +221,13 @@ func (h *Handler) CreateQueue(w http.ResponseWriter, r *http.Request, queue stri
 		return
 	}
 
-	h.log.Info("queue created", "queue", queue)
+	h.log.Debug("queue created", "queue", queue)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusCreated)
 }
 
 // DeleteQueue deletes a queue
 func (h *Handler) DeleteQueue(w http.ResponseWriter, r *http.Request, queue string) {
-	h.log.Info("deleting queue", "queue", queue)
-
 	key := h.queueKey(queue)
 
 	// Check if queue exists
@@ -273,7 +269,7 @@ func (h *Handler) DeleteQueue(w http.ResponseWriter, r *http.Request, queue stri
 		return
 	}
 
-	h.log.Info("queue deleted", "queue", queue)
+	h.log.Debug("queue deleted", "queue", queue)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -334,8 +330,6 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 
 // ListQueues lists all queues
 func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
-	h.log.Info("listing queues")
-
 	prefixFilter := r.URL.Query().Get("prefix")
 
 	prefix := []byte("queues/meta/")
@@ -368,7 +362,7 @@ func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
 		result.Queues = append(result.Queues, Queue{Name: name})
 	}
 
-	h.log.Info("queues listed", "count", len(result.Queues))
+	h.log.Debug("queues listed", "count", len(result.Queues))
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
@@ -377,8 +371,6 @@ func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
 
 // PutMessage adds a message to the queue
 func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue string) {
-	h.log.Info("putting message", "queue", queue)
-
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
 	_, closer, err := h.db.Get(queueKey)
@@ -448,7 +440,7 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 		return
 	}
 
-	h.log.Info("message added", "queue", queue, "messageId", messageID, "ttl", ttl)
+	h.log.Debug("message added", "queue", queue, "messageId", messageID)
 
 	// Return response
 	type QueueMessagesList struct {
@@ -479,8 +471,6 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 			visibilityTimeout = time.Duration(parsed) * time.Second
 		}
 	}
-
-	h.log.Debug("getting messages", "queue", queue, "numMessages", numMessages, "visibilityTimeout", visibilityTimeout)
 
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
@@ -543,7 +533,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 		messages = append(messages, msg)
 	}
 
-	h.log.Debug("messages retrieved", "queue", queue, "count", len(messages))
+	h.log.Debug("messages retrieved", "queue", queue, "requested", numMessages, "count", len(messages), "visibilityTimeout", visibilityTimeout)
 
 	type QueueMessagesList struct {
 		XMLName      xml.Name  `xml:"QueueMessagesList"`
@@ -560,8 +550,6 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 // DeleteMessage deletes a specific message
 func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request, queue, messageID string) {
 	popReceipt := r.URL.Query().Get("popreceipt")
-	h.log.Info("deleting message", "queue", queue, "messageId", messageID, "popReceipt", popReceipt)
-
 	key := h.messageKey(queue, messageID)
 
 	// Check if message exists
@@ -596,15 +584,13 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request, queue, m
 		return
 	}
 
-	h.log.Info("message deleted", "queue", queue, "messageId", messageID)
+	h.log.Debug("message deleted", "queue", queue, "messageId", messageID)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // ClearMessages clears all messages from the queue
 func (h *Handler) ClearMessages(w http.ResponseWriter, r *http.Request, queue string) {
-	h.log.Info("clearing messages", "queue", queue)
-
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
 	_, closer, err := h.db.Get(queueKey)
@@ -643,7 +629,7 @@ func (h *Handler) ClearMessages(w http.ResponseWriter, r *http.Request, queue st
 		return
 	}
 
-	h.log.Info("messages cleared", "queue", queue, "count", count)
+	h.log.Debug("messages cleared", "queue", queue, "count", count)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -657,8 +643,6 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 			numMessages = parsed
 		}
 	}
-
-	h.log.Debug("peeking messages", "queue", queue, "numMessages", numMessages)
 
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
@@ -709,7 +693,7 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 		messages = append(messages, msg)
 	}
 
-	h.log.Debug("messages peeked", "queue", queue, "count", len(messages))
+	h.log.Debug("messages peeked", "queue", queue, "requested", numMessages, "count", len(messages))
 
 	type QueueMessagesList struct {
 		XMLName      xml.Name  `xml:"QueueMessagesList"`
@@ -732,8 +716,6 @@ func (h *Handler) UpdateMessage(w http.ResponseWriter, r *http.Request, queue, m
 			visibilityTimeout = time.Duration(parsed) * time.Second
 		}
 	}
-
-	h.log.Info("updating message", "queue", queue, "messageId", messageID, "visibilityTimeout", visibilityTimeout)
 
 	key := h.messageKey(queue, messageID)
 
@@ -792,7 +774,7 @@ func (h *Handler) UpdateMessage(w http.ResponseWriter, r *http.Request, queue, m
 		return
 	}
 
-	h.log.Info("message updated", "queue", queue, "messageId", messageID)
+	h.log.Debug("message updated", "queue", queue, "messageId", messageID)
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("x-ms-popreceipt", msg.PopReceipt)
 	w.Header().Set("x-ms-time-next-visible", time.Time(msg.TimeNextVisible).UTC().Format(time.RFC1123))
@@ -801,8 +783,6 @@ func (h *Handler) UpdateMessage(w http.ResponseWriter, r *http.Request, queue, m
 
 // SetQueueMetadata sets metadata on a queue
 func (h *Handler) SetQueueMetadata(w http.ResponseWriter, r *http.Request, queue string) {
-	h.log.Info("setting queue metadata", "queue", queue)
-
 	key := h.queueKey(queue)
 
 	// Check if queue exists
@@ -847,7 +827,7 @@ func (h *Handler) SetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 		return
 	}
 
-	h.log.Info("queue metadata set", "queue", queue)
+	h.log.Debug("queue metadata set", "queue", queue)
 	common.SetResponseHeaders(w, "")
 	w.WriteHeader(http.StatusNoContent)
 }

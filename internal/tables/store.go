@@ -1049,7 +1049,7 @@ func (t *Table) QueryEntities(
 			match, matchErr := filterFunc(entityMap)
 			if matchErr != nil {
 				if errors.Is(matchErr, ErrInvalidFilter) {
-					t.log.Warn("invalid filter during evaluation", "filter", filter, "error", matchErr)
+					t.log.Debug("invalid filter during evaluation", "filter", filter, "error", matchErr)
 				}
 				err = matchErr
 				return
