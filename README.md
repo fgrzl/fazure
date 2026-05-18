@@ -54,6 +54,10 @@ A lightweight, Pebble-backed emulator for **Azure Blobs, Queues, and Tables**, d
 
 Legend: ✅ Supported | ⚠️ Partial | ❌ Not Supported
 
+## Documentation
+
+Guides: **[docs/](docs/README.md)** — [overview](docs/overview.md), [getting started](docs/getting-started.md), [configuration](docs/configuration.md)
+
 ## ➡️ Quick Start
 
 ### 🐳 Docker (recommended)
