@@ -18,7 +18,11 @@ func TestShouldReturnEntitiesGivenPartitionKeyRangeAndRowKeyRange(t *testing.T) 
 	dir := t.TempDir()
 	store, err := common.NewStore(filepath.Join(dir, "test.db"))
 	require.NoError(t, err)
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Logf("store.Close: %v", err)
+		}
+	}()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ts, err := NewTableStore(store, logger, NewMetrics())

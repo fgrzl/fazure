@@ -636,7 +636,7 @@ func TestShouldReturnFalseGivenNonNumericString(t *testing.T) {
 
 func TestShouldReturnFalseGivenNilValue(t *testing.T) {
 	// Arrange
-	var input interface{} = nil
+	var input interface{}
 
 	// Act
 	_, ok := toFloat64(input)
@@ -652,10 +652,9 @@ func TestShouldReturnFalseGivenNilValue(t *testing.T) {
 func TestShouldSplitStringPreservingCase(t *testing.T) {
 	// Arrange
 	input := "Hello AND World"
-	separator := " and "
 
 	// Act
-	result := splitPreservingCase(input, separator)
+	result := splitPreservingCase(input)
 
 	// Assert
 	assert.Equal(t, []string{"Hello", "World"}, result)
@@ -664,10 +663,9 @@ func TestShouldSplitStringPreservingCase(t *testing.T) {
 func TestShouldSplitMultipleOccurrences(t *testing.T) {
 	// Arrange
 	input := "One And Two AND Three"
-	separator := " and "
 
 	// Act
-	result := splitPreservingCase(input, separator)
+	result := splitPreservingCase(input)
 
 	// Assert
 	assert.Equal(t, []string{"One", "Two", "Three"}, result)
@@ -676,10 +674,9 @@ func TestShouldSplitMultipleOccurrences(t *testing.T) {
 func TestShouldReturnSingleElementGivenNoSeparator(t *testing.T) {
 	// Arrange
 	input := "NoSeparator"
-	separator := " and "
 
 	// Act
-	result := splitPreservingCase(input, separator)
+	result := splitPreservingCase(input)
 
 	// Assert
 	assert.Equal(t, []string{"NoSeparator"}, result)

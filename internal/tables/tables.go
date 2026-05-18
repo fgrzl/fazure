@@ -176,12 +176,12 @@ func (h *Handler) CreateTable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.CreateTable(ctx, req.TableName); err != nil {
-		if err == ErrInvalidTableName {
+		if errors.Is(err, ErrInvalidTableName) {
 			h.log.Debug("invalid table name", "table", req.TableName)
 			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid table name")
 			return
 		}
-		if err == ErrTableExists {
+		if errors.Is(err, ErrTableExists) {
 			h.log.Debug("table already exists", "table", req.TableName)
 			h.writeError(w, http.StatusConflict, "TableAlreadyExists", "Table already exists")
 			return
@@ -218,7 +218,7 @@ func (h *Handler) DeleteTable(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	if err := h.store.DeleteTable(ctx, tableName); err != nil {
-		if err == ErrTableNotFound {
+		if errors.Is(err, ErrTableNotFound) {
 			h.log.Debug("table not found", "table", tableName)
 			h.writeError(w, http.StatusNotFound, "TableNotFound", "The specified table does not exist")
 			return
@@ -246,7 +246,7 @@ func (h *Handler) GetEntity(w http.ResponseWriter, r *http.Request, tableName, p
 
 	entity, err := table.GetEntity(ctx, pk, rk)
 	if err != nil {
-		if err == ErrEntityNotFound {
+		if errors.Is(err, ErrEntityNotFound) {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
@@ -285,7 +285,7 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 
 	entity, err := table.InsertEntity(ctx, pk, rk, data)
 	if err != nil {
-		if err == ErrEntityExists {
+		if errors.Is(err, ErrEntityExists) {
 			h.log.Debug("entity already exists", "table", tableName, "partitionKey", pk, "rowKey", rk)
 			h.writeError(w, http.StatusConflict, "EntityAlreadyExists", "Entity already exists")
 			return
@@ -295,7 +295,7 @@ func (h *Handler) InsertEntity(w http.ResponseWriter, r *http.Request, tableName
 				"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
 			return
 		}
-		if err == ErrInvalidEntity {
+		if errors.Is(err, ErrInvalidEntity) {
 			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
 			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 			return
@@ -333,7 +333,7 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 
 	existing, getErr := table.GetEntity(ctx, pk, rk)
 	switch {
-	case getErr == ErrEntityNotFound && (ifMatch == "" || ifMatch == "*"):
+	case errors.Is(getErr, ErrEntityNotFound) && (ifMatch == "" || ifMatch == "*"):
 		// Upsert: insert when not found and If-Match is missing or *.
 		entity, err = table.InsertEntity(ctx, pk, rk, data)
 		if err != nil {
@@ -342,7 +342,7 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 					"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
 				return
 			}
-			if err == ErrInvalidEntity {
+			if errors.Is(err, ErrInvalidEntity) {
 				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
 				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 				return
@@ -353,7 +353,7 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		}
 		h.log.Debug("entity upserted (inserted)", "table", tableName, "partitionKey", pk, "rowKey", rk)
 
-	case getErr == ErrEntityNotFound:
+	case errors.Is(getErr, ErrEntityNotFound):
 		// Entity doesn't exist and no wildcard ETag - fail with 404.
 		h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 		return
@@ -367,11 +367,11 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 		_ = existing // we only needed to know that it exists
 		entity, err = table.UpdateEntityWithETag(ctx, pk, rk, data, false, ifMatch)
 		if err != nil {
-			if err == ErrEntityNotFound {
+			if errors.Is(err, ErrEntityNotFound) {
 				h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 				return
 			}
-			if err == ErrPreconditionFailed {
+			if errors.Is(err, ErrPreconditionFailed) {
 				h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 					"The update condition specified in the request was not satisfied")
 				return
@@ -381,7 +381,7 @@ func (h *Handler) UpdateEntity(w http.ResponseWriter, r *http.Request, tableName
 					"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
 				return
 			}
-			if err == ErrInvalidEntity {
+			if errors.Is(err, ErrInvalidEntity) {
 				h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
 				h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 				return
@@ -423,11 +423,11 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 	}
 
 	if err != nil {
-		if err == ErrEntityNotFound {
+		if errors.Is(err, ErrEntityNotFound) {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
-		if err == ErrPreconditionFailed {
+		if errors.Is(err, ErrPreconditionFailed) {
 			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 				"The update condition specified in the request was not satisfied")
 			return
@@ -437,7 +437,7 @@ func (h *Handler) MergeEntity(w http.ResponseWriter, r *http.Request, tableName,
 				"The property value exceeds the maximum allowed size (64KB). If the property value is a string, it is UTF-16 encoded and the maximum number of characters should be 32K or less.")
 			return
 		}
-		if err == ErrInvalidEntity {
+		if errors.Is(err, ErrInvalidEntity) {
 			h.log.Debug("invalid entity", "table", tableName, "partitionKey", pk, "rowKey", rk, "error", err)
 			h.writeError(w, http.StatusBadRequest, "InvalidInput", "Invalid entity: validation failed")
 			return
@@ -464,11 +464,11 @@ func (h *Handler) DeleteEntity(w http.ResponseWriter, r *http.Request, tableName
 	ifMatch := r.Header.Get("If-Match")
 	err = table.DeleteEntityWithETag(ctx, pk, rk, ifMatch)
 	if err != nil {
-		if err == ErrEntityNotFound {
+		if errors.Is(err, ErrEntityNotFound) {
 			h.writeError(w, http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist")
 			return
 		}
-		if err == ErrPreconditionFailed {
+		if errors.Is(err, ErrPreconditionFailed) {
 			h.writeError(w, http.StatusPreconditionFailed, "UpdateConditionNotSatisfied",
 				"The update condition specified in the request was not satisfied")
 			return
@@ -637,8 +637,8 @@ func (h *Handler) HandleBatchOperation(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var httpResp strings.Builder
-		httpResp.WriteString(fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode)))
-		httpResp.WriteString(fmt.Sprintf("Content-ID: %d\r\n", i+1))
+		fmt.Fprintf(&httpResp, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+		fmt.Fprintf(&httpResp, "Content-ID: %d\r\n", i+1)
 		httpResp.WriteString("X-Content-Type-Options: nosniff\r\n")
 		httpResp.WriteString("Cache-Control: no-cache\r\n")
 		httpResp.WriteString("DataServiceVersion: 3.0;\r\n")
@@ -724,7 +724,7 @@ func (h *Handler) executeBatch(ctx context.Context, batchReq *BatchRequest) ([]B
 		case "PATCH", "MERGE":
 			// MERGE/PATCH: upsert semantics, no existence validation required.
 		case http.MethodDelete:
-			if _, err := table.GetEntity(ctx, pk, rk); err == ErrEntityNotFound {
+			if _, err := table.GetEntity(ctx, pk, rk); errors.Is(err, ErrEntityNotFound) {
 				return nil, i, ErrEntityNotFound
 			}
 		default:
@@ -754,7 +754,7 @@ func (h *Handler) executeBatch(ctx context.Context, batchReq *BatchRequest) ([]B
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case http.MethodPut:
-			if _, err := table.GetEntity(ctx, pk, rk); err == ErrEntityNotFound {
+			if _, err := table.GetEntity(ctx, pk, rk); errors.Is(err, ErrEntityNotFound) {
 				if _, err := table.InsertEntity(ctx, pk, rk, props); err != nil {
 					return nil, i, err
 				}
@@ -768,7 +768,7 @@ func (h *Handler) executeBatch(ctx context.Context, batchReq *BatchRequest) ([]B
 			responses[i] = BatchOperationResponse{StatusCode: http.StatusNoContent}
 
 		case "PATCH", "MERGE":
-			if _, err := table.GetEntity(ctx, pk, rk); err == ErrEntityNotFound {
+			if _, err := table.GetEntity(ctx, pk, rk); errors.Is(err, ErrEntityNotFound) {
 				if _, err := table.InsertEntity(ctx, pk, rk, props); err != nil {
 					return nil, i, err
 				}
@@ -814,9 +814,9 @@ func (h *Handler) writeBatchError(w http.ResponseWriter, statusCode int, code, m
 	errorBody := fmt.Sprintf(`{"odata.error":{"code":"%s","message":{"lang":"en-US","value":"%s"}}}`, code, message)
 
 	var httpResp strings.Builder
-	httpResp.WriteString(fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode)))
+	fmt.Fprintf(&httpResp, "HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
 	httpResp.WriteString("Content-Type: application/json;odata=minimalmetadata\r\n")
-	httpResp.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(errorBody)))
+	fmt.Fprintf(&httpResp, "Content-Length: %d\r\n", len(errorBody))
 	httpResp.WriteString("\r\n")
 	httpResp.WriteString(errorBody)
 
@@ -844,14 +844,14 @@ func (h *Handler) writeBatchErrorWithIndex(w http.ResponseWriter, index int, err
 	code := "InvalidInput"
 	statusCode := http.StatusBadRequest
 
-	switch err {
-	case ErrEntityExists:
+	switch {
+	case errors.Is(err, ErrEntityExists):
 		code = "EntityAlreadyExists"
 		statusCode = http.StatusConflict
-	case ErrEntityNotFound:
+	case errors.Is(err, ErrEntityNotFound):
 		code = "ResourceNotFound"
 		statusCode = http.StatusNotFound
-	case ErrPropertyValueTooLarge:
+	case errors.Is(err, ErrPropertyValueTooLarge):
 		code = "PropertyValueTooLarge"
 		statusCode = http.StatusBadRequest
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -77,19 +78,19 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 			// This is a changeset, parse its inner operations
 			_, changesetParams, err := mime.ParseMediaType(partContentType)
 			if err != nil {
-				part.Close()
+				_ = part.Close()
 				continue
 			}
 			changesetBoundary := changesetParams["boundary"]
 			if changesetBoundary == "" {
-				part.Close()
+				_ = part.Close()
 				continue
 			}
 
 			// Read the part content into a buffer
 			partContent, err := io.ReadAll(part)
 			if err != nil {
-				part.Close()
+				_ = part.Close()
 				continue
 			}
 
@@ -97,7 +98,7 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 			changesetReader := multipart.NewReader(bytes.NewReader(partContent), changesetBoundary)
 			for {
 				opPart, err := changesetReader.NextPart()
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 				if err != nil {
@@ -107,19 +108,19 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 				// Each operation part contains an HTTP request
 				opContent, err := io.ReadAll(opPart)
 				if err != nil {
-					opPart.Close()
+					_ = opPart.Close()
 					continue
 				}
 
 				// Parse the HTTP request from the content
 				httpReq, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(opContent)))
 				if err != nil {
-					opPart.Close()
+					_ = opPart.Close()
 					continue
 				}
 
 				body, _ := io.ReadAll(httpReq.Body)
-				httpReq.Body.Close()
+				_ = httpReq.Body.Close()
 
 				// Parse body to extract PartitionKey and RowKey
 				var entityData map[string]interface{}
@@ -177,11 +178,11 @@ func ParseBatchRequest(r *http.Request) (*BatchRequest, error) {
 				}
 				batchReq.Operations = append(batchReq.Operations, op)
 
-				opPart.Close()
+				_ = opPart.Close()
 			}
 		}
 
-		part.Close()
+		_ = part.Close()
 	}
 
 	return batchReq, nil

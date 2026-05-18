@@ -1,4 +1,4 @@
-package test
+﻿package test
 
 import (
 	"context"
@@ -63,8 +63,12 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	server.Close()
-	store.Close()
-	os.RemoveAll(dir)
+	if err := store.Close(); err != nil {
+		fmt.Println("failed to close store:", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Println("failed to remove temp dir:", err)
+	}
 	os.Exit(code)
 }
 
@@ -113,10 +117,10 @@ func TestShouldInsertEntityGivenNewPKRKWhenCallingAddEntity(t *testing.T) {
 		"Age":          30,
 	}
 
-	marshalled, err := json.Marshal(entity)
+	marshaled, err := json.Marshal(entity)
 	require.NoError(t, err)
 
-	_, err = client.AddEntity(ctx, marshalled, nil)
+	_, err = client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err, "AddEntity should succeed")
 }
 
@@ -134,14 +138,14 @@ func TestShouldDetectConflictGivenExistingEntityWhenCallingAddEntity(t *testing.
 		"Value":        "initial",
 	}
 
-	marshalled, err := json.Marshal(entity)
+	marshaled, err := json.Marshal(entity)
 	require.NoError(t, err)
 
-	_, err = client.AddEntity(ctx, marshalled, nil)
+	_, err = client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Try to add again
-	_, err = client.AddEntity(ctx, marshalled, nil)
+	_, err = client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Duplicate PK/RK should fail with conflict")
 }
 
@@ -159,10 +163,10 @@ func TestShouldGetEntityGivenExistingPKRKWhenCallingGetEntity(t *testing.T) {
 		"Name":         "Bob",
 	}
 
-	marshalled, err := json.Marshal(entity)
+	marshaled, err := json.Marshal(entity)
 	require.NoError(t, err)
 
-	_, err = client.AddEntity(ctx, marshalled, nil)
+	_, err = client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Get entity
@@ -204,10 +208,10 @@ func TestShouldUpdateEntityGivenExistingEntityWhenCallingUpdateEntity(t *testing
 		"Value":        "initial",
 	}
 
-	marshalled, err := json.Marshal(entity)
+	marshaled, err := json.Marshal(entity)
 	require.NoError(t, err)
 
-	addResp, err := client.AddEntity(ctx, marshalled, nil)
+	addResp, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Update entity
@@ -240,10 +244,10 @@ func TestShouldDeleteEntityGivenValidPKRKWhenCallingDeleteEntity(t *testing.T) {
 		"RowKey":       "r",
 	}
 
-	marshalled, err := json.Marshal(entity)
+	marshaled, err := json.Marshal(entity)
 	require.NoError(t, err)
 
-	_, err = client.AddEntity(ctx, marshalled, nil)
+	_, err = client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Delete entity
@@ -266,9 +270,9 @@ func TestShouldQueryEntitiesGivenFilterWhenCallingListEntities(t *testing.T) {
 			"RowKey":       fmt.Sprintf("%d", i),
 			"Value":        i,
 		}
-		marshalled, err := json.Marshal(entity)
+		marshaled, err := json.Marshal(entity)
 		require.NoError(t, err)
-		_, err = client.AddEntity(ctx, marshalled, nil)
+		_, err = client.AddEntity(ctx, marshaled, nil)
 		require.NoError(t, err)
 	}
 
@@ -285,7 +289,7 @@ func TestShouldQueryEntitiesGivenFilterWhenCallingListEntities(t *testing.T) {
 
 		for _, e := range page.Entities {
 			var entity map[string]interface{}
-			json.Unmarshal(e, &entity)
+			require.NoError(t, json.Unmarshal(e, &entity))
 			results = append(results, entity)
 		}
 	}
@@ -307,9 +311,9 @@ func TestShouldReturnContinuationTokensGivenLargeResultSetWhenCallingListEntitie
 			"PartitionKey": "p",
 			"RowKey":       fmt.Sprintf("%04d", i),
 		}
-		marshalled, err := json.Marshal(entity)
+		marshaled, err := json.Marshal(entity)
 		require.NoError(t, err)
-		_, err = client.AddEntity(ctx, marshalled, nil)
+		_, err = client.AddEntity(ctx, marshaled, nil)
 		require.NoError(t, err)
 	}
 
@@ -397,7 +401,7 @@ func TestShouldPaginateFilteredResultsWithoutSkipsWhenCallingListEntities(t *tes
 		pageCount++
 		for _, e := range page.Entities {
 			var ent map[string]interface{}
-			json.Unmarshal(e, &ent)
+			require.NoError(t, json.Unmarshal(e, &ent))
 			assert.Equal(t, "important", ent["Kind"])
 			key := fmt.Sprintf("%s|%s", ent["PartitionKey"], ent["RowKey"])
 			if seen[key] {
@@ -547,8 +551,8 @@ func TestShouldMergeEntityGivenExistingEntityWhenCallingUpsertEntity(t *testing.
 		"Name":         "Alice",
 		"Age":          30,
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Merge with new properties
@@ -569,7 +573,7 @@ func TestShouldMergeEntityGivenExistingEntityWhenCallingUpsertEntity(t *testing.
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.Equal(t, "Alice", retrieved["Name"], "Original property should be preserved")
 	assert.Equal(t, "Seattle", retrieved["City"], "New property should be added")
@@ -594,8 +598,8 @@ func TestShouldInsertEntityGivenNonExistentEntityWhenCallingUpsertEntity(t *test
 		"RowKey":       "new",
 		"Value":        "inserted",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.UpsertEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.UpsertEntity(ctx, marshaled, nil)
 	require.NoError(t, err, "Upsert should succeed for new entity")
 
 	// Verify insert
@@ -603,7 +607,7 @@ func TestShouldInsertEntityGivenNonExistentEntityWhenCallingUpsertEntity(t *test
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 	assert.Equal(t, "inserted", retrieved["Value"])
 }
 
@@ -620,7 +624,7 @@ func TestShouldListTablesGivenMultipleTablesWhenCallingListTables(t *testing.T) 
 	for _, name := range tables {
 		tc := service.NewClient(name)
 		_, _ = tc.CreateTable(ctx, nil)
-		defer tc.Delete(ctx, nil)
+		t.Cleanup(func() { _, err := tc.Delete(ctx, nil); if err != nil { t.Logf("table delete: %v", err) } })
 	}
 
 	// List tables
@@ -718,7 +722,7 @@ func TestShouldReturnOnlySelectedPropertiesGivenSelectWhenCallingListEntities(t 
 	for pager.More() {
 		page, _ := pager.NextPage(ctx)
 		if len(page.Entities) > 0 {
-			json.Unmarshal(page.Entities[0], &retrieved)
+			require.NoError(t, json.Unmarshal(page.Entities[0], &retrieved))
 			break
 		}
 	}
@@ -873,7 +877,7 @@ func TestShouldStoreComplexTypesGivenVariousTypesWhenCallingAddEntity(t *testing
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.Equal(t, "hello", retrieved["StringProp"])
 	assert.Equal(t, float64(42), retrieved["IntProp"]) // JSON unmarshals to float64
@@ -922,7 +926,7 @@ func TestShouldReturnSingleEntityGivenManyInPartitionWhenCallingListEntities(t *
 		require.NoError(t, err)
 		for _, e := range page.Entities {
 			var ent map[string]interface{}
-			json.Unmarshal(e, &ent)
+			require.NoError(t, json.Unmarshal(e, &ent))
 			results = append(results, ent)
 		}
 	}
@@ -967,7 +971,7 @@ func TestShouldPageThroughAllEntitiesWithoutDropOrDuplicateWhenCallingListEntiti
 		pageCount++
 		for _, e := range page.Entities {
 			var ent map[string]interface{}
-			json.Unmarshal(e, &ent)
+			require.NoError(t, json.Unmarshal(e, &ent))
 			key := fmt.Sprintf("%s|%s", ent["PartitionKey"], ent["RowKey"])
 			if seen[key] {
 				assert.Fail(t, "Duplicate entity encountered across pages", key)
@@ -1025,7 +1029,7 @@ func TestShouldFilterByPartitionKeyAndAdditionalPredicateWhenCallingListEntities
 		require.NoError(t, err)
 		for _, e := range page.Entities {
 			var ent map[string]interface{}
-			json.Unmarshal(e, &ent)
+			require.NoError(t, json.Unmarshal(e, &ent))
 			assert.Equal(t, "tenant-b", ent["PartitionKey"])
 			assert.Equal(t, true, ent["Enabled"])
 			count++
@@ -1049,8 +1053,8 @@ func TestShouldRollbackAllOperationsGivenBatchFailureWhenCallingTransactionalBat
 		"RowKey":       "rk-existing",
 		"Value":        "exists",
 	}
-	marshalled, _ := json.Marshal(existingEntity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(existingEntity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Act: Try batch with 3 inserts, middle one conflicts
@@ -1095,7 +1099,7 @@ func TestShouldRollbackAllOperationsGivenBatchFailureWhenCallingTransactionalBat
 	resp, err := client.GetEntity(ctx, "pk1", "rk-existing", nil)
 	require.NoError(t, err)
 	var retrieved map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 	assert.Equal(t, "exists", retrieved["Value"])
 }
 
@@ -1114,8 +1118,8 @@ func TestShouldCommitAllOperationsGivenValidBatchWhenCallingTransactionalBatch(t
 		"RowKey":       "rk-update",
 		"Value":        "original",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshaled, nil)
 
 	// Create entity to delete
 	deleteEntity := map[string]interface{}{
@@ -1123,8 +1127,8 @@ func TestShouldCommitAllOperationsGivenValidBatchWhenCallingTransactionalBatch(t
 		"RowKey":       "rk-delete",
 		"Value":        "to-delete",
 	}
-	marshalled, _ = json.Marshal(deleteEntity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ = json.Marshal(deleteEntity)
+	_, _ = client.AddEntity(ctx, marshaled, nil)
 
 	batch := []aztables.TransactionAction{
 		{
@@ -1160,13 +1164,13 @@ func TestShouldCommitAllOperationsGivenValidBatchWhenCallingTransactionalBatch(t
 	resp, err := client.GetEntity(ctx, "pk1", "rk-new", nil)
 	require.NoError(t, err)
 	var newEntity map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &newEntity)
+	require.NoError(t, json.Unmarshal(resp.Value, &newEntity))
 	assert.Equal(t, "inserted", newEntity["Value"])
 
 	resp, err = client.GetEntity(ctx, "pk1", "rk-update", nil)
 	require.NoError(t, err)
 	var updatedEntity map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &updatedEntity)
+	require.NoError(t, json.Unmarshal(resp.Value, &updatedEntity))
 	assert.Equal(t, "updated", updatedEntity["Value"])
 	assert.Equal(t, "added", updatedEntity["NewField"])
 
@@ -1179,7 +1183,6 @@ func TestShouldCommitAllOperationsGivenValidBatchWhenCallingTransactionalBatch(t
 // ============================================================================
 
 func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatch(t *testing.T) {
-
 	ctx := context.Background()
 	client := newTableClient(t, "testputsemantics")
 	_, _ = client.CreateTable(ctx, nil)
@@ -1193,9 +1196,9 @@ func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatch
 		"RowKey":       "nonexistent",
 		"Value":        "new",
 	}
-	marshalled, _ := json.Marshal(entity)
+	marshaled, _ := json.Marshal(entity)
 
-	_, err := client.UpdateEntity(ctx, marshalled, &aztables.UpdateEntityOptions{
+	_, err := client.UpdateEntity(ctx, marshaled, &aztables.UpdateEntityOptions{
 		UpdateMode: aztables.UpdateModeReplace, // This is PUT
 		// No If-Match means InsertOrReplace (upsert) for service versions 2011-08-18 and later.
 	})
@@ -1205,7 +1208,7 @@ func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithoutIfMatch
 	resp, err := client.GetEntity(ctx, "pk1", "nonexistent", nil)
 	require.NoError(t, err)
 	var stored map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &stored)
+	require.NoError(t, json.Unmarshal(resp.Value, &stored))
 	assert.Equal(t, "new", stored["Value"])
 }
 
@@ -1223,10 +1226,10 @@ func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithIfMatchSta
 		"RowKey":       "new",
 		"Value":        "upserted",
 	}
-	marshalled, _ := json.Marshal(entity)
+	marshaled, _ := json.Marshal(entity)
 
 	wildcardEtag := azcore.ETag("*")
-	_, err := client.UpdateEntity(ctx, marshalled, &aztables.UpdateEntityOptions{
+	_, err := client.UpdateEntity(ctx, marshaled, &aztables.UpdateEntityOptions{
 		UpdateMode: aztables.UpdateModeReplace,
 		IfMatch:    &wildcardEtag,
 	})
@@ -1237,7 +1240,7 @@ func TestShouldUpsertGivenNonExistentEntityWhenCallingUpdateEntityWithIfMatchSta
 	resp, err := client.GetEntity(ctx, "pk1", "new", nil)
 	require.NoError(t, err)
 	var retrieved map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 	assert.Equal(t, "upserted", retrieved["Value"])
 }
 
@@ -1286,8 +1289,8 @@ func TestShouldPreserveEdmDateTimeTypeGivenDateTimePropertyWhenStoringEntity(t *
 		},
 	}
 
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Act: Retrieve entity
@@ -1296,7 +1299,7 @@ func TestShouldPreserveEdmDateTimeTypeGivenDateTimePropertyWhenStoringEntity(t *
 
 	// Assert: Should have type metadata
 	var retrieved map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	// Azure returns: "CreatedAt@odata.type": "Edm.DateTime"
 	odataType, hasType := retrieved["CreatedAt@odata.type"]
@@ -1326,8 +1329,8 @@ func TestShouldPreserveEdmGuidTypeGivenGuidPropertyWhenStoringEntity(t *testing.
 		},
 	}
 
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Act: Retrieve entity
@@ -1336,7 +1339,7 @@ func TestShouldPreserveEdmGuidTypeGivenGuidPropertyWhenStoringEntity(t *testing.
 
 	// Assert: Should have type metadata
 	var retrieved map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	// Azure returns: "ID@odata.type": "Edm.Guid"
 	odataType, hasType := retrieved["ID@odata.type"]
@@ -1366,8 +1369,8 @@ func TestShouldIgnoreTimestampInRequestGivenClientTimestampWhenInsertingEntity(t
 		"Value":        "test",
 	}
 
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Act: Retrieve entity
@@ -1375,7 +1378,7 @@ func TestShouldIgnoreTimestampInRequestGivenClientTimestampWhenInsertingEntity(t
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	// Assert: Timestamp should be system-generated, not custom
 	timestampStr, ok := retrieved["Timestamp"].(string)
@@ -1404,8 +1407,8 @@ func TestShouldIgnoreETagInRequestGivenClientETagWhenInsertingEntity(t *testing.
 		"Value":        "test",
 	}
 
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	// Act: Retrieve entity
@@ -1413,7 +1416,7 @@ func TestShouldIgnoreETagInRequestGivenClientETagWhenInsertingEntity(t *testing.
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	_ = json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	// Assert: ETag should be system-generated, not custom
 	etag, ok := retrieved["odata.etag"].(string)
@@ -1442,8 +1445,8 @@ func TestShouldRejectPartitionKeyWithProhibitedCharactersWhenCallingAddEntity(t 
 				"PartitionKey": "invalid" + ch + "key",
 				"RowKey":       "rk1",
 			}
-			marshalled, _ := json.Marshal(entity)
-			_, err := client.AddEntity(ctx, marshalled, nil)
+			marshaled, _ := json.Marshal(entity)
+			_, err := client.AddEntity(ctx, marshaled, nil)
 			assert.Error(t, err, "Should reject PartitionKey with prohibited character: %q", ch)
 		})
 	}
@@ -1465,8 +1468,8 @@ func TestShouldRejectRowKeyWithProhibitedCharactersWhenCallingAddEntity(t *testi
 				"PartitionKey": "pk1",
 				"RowKey":       "invalid" + ch + "key",
 			}
-			marshalled, _ := json.Marshal(entity)
-			_, err := client.AddEntity(ctx, marshalled, nil)
+			marshaled, _ := json.Marshal(entity)
+			_, err := client.AddEntity(ctx, marshaled, nil)
 			assert.Error(t, err, "Should reject RowKey with prohibited character: %q", ch)
 		})
 	}
@@ -1486,8 +1489,8 @@ func TestShouldRejectPartitionKeyExceeding1KBWhenCallingAddEntity(t *testing.T) 
 		"PartitionKey": longKey,
 		"RowKey":       "rk1",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject PartitionKey exceeding 1KB")
 }
 
@@ -1504,8 +1507,8 @@ func TestShouldRejectRowKeyExceeding1KBWhenCallingAddEntity(t *testing.T) {
 		"PartitionKey": "pk1",
 		"RowKey":       longKey,
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject RowKey exceeding 1KB")
 }
 
@@ -1521,8 +1524,8 @@ func TestShouldRejectEmptyPartitionKeyWhenCallingAddEntity(t *testing.T) {
 		"PartitionKey": "",
 		"RowKey":       "rk1",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject empty PartitionKey")
 }
 
@@ -1538,8 +1541,8 @@ func TestShouldRejectEmptyRowKeyWhenCallingAddEntity(t *testing.T) {
 		"PartitionKey": "pk1",
 		"RowKey":       "",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject empty RowKey")
 }
 
@@ -1552,21 +1555,21 @@ func TestShouldHandleUnicodeInPartitionAndRowKeysWhenCallingAddEntity(t *testing
 	}()
 
 	entity := map[string]interface{}{
-		"PartitionKey": "tenant-日本語",
-		"RowKey":       "user-Ñoño",
+		"PartitionKey": "tenant-æ—¥æœ¬èªž",
+		"RowKey":       "user-Ã‘oÃ±o",
 		"Name":         "Test",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err, "Should accept valid Unicode in keys")
 
 	// Verify retrieval
-	resp, err := client.GetEntity(ctx, "tenant-日本語", "user-Ñoño", nil)
+	resp, err := client.GetEntity(ctx, "tenant-æ—¥æœ¬èªž", "user-Ã‘oÃ±o", nil)
 	require.NoError(t, err)
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
-	assert.Equal(t, "tenant-日本語", retrieved["PartitionKey"])
-	assert.Equal(t, "user-Ñoño", retrieved["RowKey"])
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
+	assert.Equal(t, "tenant-æ—¥æœ¬èªž", retrieved["PartitionKey"])
+	assert.Equal(t, "user-Ã‘oÃ±o", retrieved["RowKey"])
 }
 
 // ============================================================================
@@ -1588,8 +1591,8 @@ func TestShouldRejectEntityExceeding1MBWhenCallingAddEntity(t *testing.T) {
 		"RowKey":       "rk1",
 		"LargeData":    largeValue,
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject entity exceeding 1MB")
 }
 
@@ -1609,8 +1612,8 @@ func TestShouldRejectEntityWithOver255PropertiesWhenCallingAddEntity(t *testing.
 	for i := 0; i < 256; i++ {
 		entity[fmt.Sprintf("Prop%d", i)] = i
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject entity with more than 255 properties")
 }
 
@@ -1629,8 +1632,8 @@ func TestShouldRejectStringPropertyExceeding64KBWhenCallingAddEntity(t *testing.
 		"RowKey":       "rk1",
 		"LargeString":  largeString,
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject string property exceeding 64KB")
 }
 
@@ -1650,8 +1653,8 @@ func TestShouldAcceptEntityWith255PropertiesWhenCallingAddEntity(t *testing.T) {
 	for i := 0; i < 255; i++ {
 		entity[fmt.Sprintf("Prop%d", i)] = i
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err, "Should accept entity with exactly 255 properties")
 }
 
@@ -1673,8 +1676,8 @@ func TestShouldRejectPropertyNameExceeding255CharsWhenCallingAddEntity(t *testin
 		"RowKey":       "rk1",
 		longPropName:   "value",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject property name exceeding 255 characters")
 }
 
@@ -1692,8 +1695,8 @@ func TestShouldRejectPropertyNameWithInvalidCharactersWhenCallingAddEntity(t *te
 		"RowKey":        "rk1",
 		"Invalid\tProp": "value",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	assert.Error(t, err, "Should reject property name with control characters")
 }
 
@@ -1761,10 +1764,10 @@ func TestShouldRejectBatchExceeding100OperationsWhenCallingSubmitTransaction(t *
 			"PartitionKey": "pk1",
 			"RowKey":       fmt.Sprintf("rk%d", i),
 		}
-		marshalled, _ := json.Marshal(entity)
+		marshaled, _ := json.Marshal(entity)
 		actions[i] = aztables.TransactionAction{
 			ActionType: aztables.TransactionTypeAdd,
-			Entity:     marshalled,
+			Entity:     marshaled,
 		}
 	}
 
@@ -1787,10 +1790,10 @@ func TestShouldAcceptBatchWith100OperationsWhenCallingSubmitTransaction(t *testi
 			"PartitionKey": "pk1",
 			"RowKey":       fmt.Sprintf("rk%d", i),
 		}
-		marshalled, _ := json.Marshal(entity)
+		marshaled, _ := json.Marshal(entity)
 		actions[i] = aztables.TransactionAction{
 			ActionType: aztables.TransactionTypeAdd,
-			Entity:     marshalled,
+			Entity:     marshaled,
 		}
 	}
 
@@ -1815,10 +1818,10 @@ func TestShouldRejectBatchExceeding4MBWhenCallingSubmitTransaction(t *testing.T)
 			"RowKey":       fmt.Sprintf("rk%d", i),
 			"Data":         largeValue,
 		}
-		marshalled, _ := json.Marshal(entity)
+		marshaled, _ := json.Marshal(entity)
 		actions[i] = aztables.TransactionAction{
 			ActionType: aztables.TransactionTypeAdd,
-			Entity:     marshalled,
+			Entity:     marshaled,
 		}
 	}
 
@@ -1916,15 +1919,15 @@ func TestShouldDistinguishEmptyStringFromNullWhenCallingAddEntity(t *testing.T) 
 		"EmptyString":  "",
 		// MissingProp is null (not present)
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.Contains(t, retrieved, "EmptyString", "Empty string property should exist")
 	assert.Equal(t, "", retrieved["EmptyString"])
@@ -1949,15 +1952,15 @@ func TestShouldPreserveInt64WithTypeAnnotationWhenCallingAddEntity(t *testing.T)
 		"LargeNumber":            "9223372036854775807", // Max Int64
 		"LargeNumber@odata.type": "Edm.Int64",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.Equal(t, "Edm.Int64", retrieved["LargeNumber@odata.type"])
 }
@@ -1978,15 +1981,15 @@ func TestShouldHandleBinaryPropertyWhenCallingAddEntity(t *testing.T) {
 		"BinaryData":            binaryData,
 		"BinaryData@odata.type": "Edm.Binary",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.Equal(t, "Edm.Binary", retrieved["BinaryData@odata.type"])
 	assert.Equal(t, binaryData, retrieved["BinaryData"])
@@ -2006,15 +2009,15 @@ func TestShouldHandleDoublePropertyWhenCallingAddEntity(t *testing.T) {
 		"Pi":           3.14159265359,
 		"E":            2.71828182846,
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, err := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, err := client.AddEntity(ctx, marshaled, nil)
 	require.NoError(t, err)
 
 	resp, err := client.GetEntity(ctx, "pk1", "rk1", nil)
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.InDelta(t, 3.14159265359, retrieved["Pi"], 0.0001)
 	assert.InDelta(t, 2.71828182846, retrieved["E"], 0.0001)
@@ -2033,8 +2036,8 @@ func TestShouldCoerceInt32ToInt64InFilterWhenCallingListEntities(t *testing.T) {
 		"RowKey":       "rk1",
 		"Count":        42,
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshaled, nil)
 
 	// Filter with integer comparison
 	filter := "Count eq 42"
@@ -2116,8 +2119,8 @@ func TestShouldTreatPartitionKeyAsCaseSensitiveWhenCallingGetEntity(t *testing.T
 		"PartitionKey": "PK1",
 		"RowKey":       "rk1",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshaled, nil)
 
 	// Try to get with different case
 	_, err := client.GetEntity(ctx, "pk1", "rk1", nil)
@@ -2140,8 +2143,8 @@ func TestShouldTreatRowKeyAsCaseSensitiveWhenCallingGetEntity(t *testing.T) {
 		"PartitionKey": "pk1",
 		"RowKey":       "RK1",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshaled, nil)
 
 	// Try to get with different case
 	_, err := client.GetEntity(ctx, "pk1", "rk1", nil)
@@ -2172,8 +2175,8 @@ func TestShouldNotDeletePropertiesGivenMissingPropertiesWhenCallingMerge(t *test
 		"Age":          30,
 		"City":         "Seattle",
 	}
-	marshalled, _ := json.Marshal(entity)
-	_, _ = client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	_, _ = client.AddEntity(ctx, marshaled, nil)
 
 	// Merge with only subset of properties
 	merge := map[string]interface{}{
@@ -2192,7 +2195,7 @@ func TestShouldNotDeletePropertiesGivenMissingPropertiesWhenCallingMerge(t *test
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.Equal(t, "Alice", retrieved["Name"], "Name should be preserved")
 	assert.Equal(t, "Seattle", retrieved["City"], "City should be preserved")
@@ -2214,8 +2217,8 @@ func TestShouldDeleteAllNonKeyPropertiesGivenEmptyEntityWhenCallingReplace(t *te
 		"Name":         "Alice",
 		"Age":          30,
 	}
-	marshalled, _ := json.Marshal(entity)
-	addResp, _ := client.AddEntity(ctx, marshalled, nil)
+	marshaled, _ := json.Marshal(entity)
+	addResp, _ := client.AddEntity(ctx, marshaled, nil)
 
 	// Replace with entity containing no custom properties
 	replace := map[string]interface{}{
@@ -2234,7 +2237,7 @@ func TestShouldDeleteAllNonKeyPropertiesGivenEmptyEntityWhenCallingReplace(t *te
 	require.NoError(t, err)
 
 	var retrieved map[string]interface{}
-	json.Unmarshal(resp.Value, &retrieved)
+	require.NoError(t, json.Unmarshal(resp.Value, &retrieved))
 
 	assert.NotContains(t, retrieved, "Name", "Name should be removed in replace")
 	assert.NotContains(t, retrieved, "Age", "Age should be removed in replace")
@@ -2273,7 +2276,7 @@ func TestShouldReturnConsistentResultsAcrossPagesWhenCallingListEntities(t *test
 		require.NoError(t, err)
 		for _, e := range page.Entities {
 			var ent map[string]interface{}
-			json.Unmarshal(e, &ent)
+			require.NoError(t, json.Unmarshal(e, &ent))
 			allKeys = append(allKeys, ent["RowKey"].(string))
 		}
 	}

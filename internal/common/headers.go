@@ -34,12 +34,14 @@ func SetBlobHeaders(w http.ResponseWriter, contentType string, contentLength int
 func WriteErrorResponse(w http.ResponseWriter, statusCode int, errorCode, message string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(statusCode)
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>
+	if _, err := fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>
 <Error>
   <Code>%s</Code>
   <Message>%s</Message>
   <RequestId>%s</RequestId>
-</Error>`, errorCode, message, GenerateRequestID())
+</Error>`, errorCode, message, GenerateRequestID()); err != nil {
+		return
+	}
 }
 
 // GenerateRequestID creates a unique request ID

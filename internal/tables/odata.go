@@ -368,21 +368,19 @@ func SelectFields(entity map[string]interface{}, fields []string) map[string]int
 	return result
 }
 
-// PartitionKeyHint represents extracted partition key filter information
-type PartitionKeyHint struct {
-	Exact      string // Exact match value from "PartitionKey eq 'value'"
-	RangeStart string // Start value from "PartitionKey ge 'value'" or "PartitionKey gt 'value'"
-	RangeEnd   string // End value from "PartitionKey le 'value'" or "PartitionKey lt 'value'"
+// keyRangeHint holds extracted key filter information for PartitionKey or RowKey.
+type keyRangeHint struct {
+	Exact      string // Exact match value from "Key eq 'value'"
+	RangeStart string // Start value from "Key ge 'value'" or "Key gt 'value'"
+	RangeEnd   string // End value from "Key le 'value'" or "Key lt 'value'"
 	UseRange   bool   // True if range operators were found
 }
 
-// RowKeyHint represents extracted row key filter information
-type RowKeyHint struct {
-	Exact      string // Exact match value from "RowKey eq 'value'"
-	RangeStart string // Start value from "RowKey ge 'value'" or "RowKey gt 'value'"
-	RangeEnd   string // End value from "RowKey le 'value'" or "RowKey lt 'value'"
-	UseRange   bool   // True if range operators were found
-}
+// PartitionKeyHint represents extracted partition key filter information.
+type PartitionKeyHint = keyRangeHint
+
+// RowKeyHint represents extracted row key filter information.
+type RowKeyHint = keyRangeHint
 
 // extractPartitionKeyFromFilter extracts PartitionKey filter information from OData filter
 // This allows optimizing queries by scanning only the relevant partition or partition range
@@ -399,80 +397,18 @@ func extractPartitionKeyFromFilter(filter string) string {
 	return ""
 }
 
-// extractPartitionKeyHint extracts detailed PartitionKey filter information
+// extractPartitionKeyHint extracts detailed PartitionKey filter information.
 func extractPartitionKeyHint(filter string) PartitionKeyHint {
-	hint := PartitionKeyHint{}
-
-	if filter == "" {
-		return hint
-	}
-
-	filter = strings.TrimSpace(filter)
-
-	// Look for PartitionKey patterns
-	// Handle both standalone and AND-combined filters
-	parts := strings.Split(strings.ToLower(filter), " and ")
-	originalParts := splitPreservingCase(filter, " and ")
-
-	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		origPart := strings.TrimSpace(originalParts[i])
-
-		// Check for PartitionKey eq 'value'
-		if strings.HasPrefix(part, "partitionkey eq ") {
-			idx := findOperatorIndex(origPart, " eq ")
-			if idx >= 0 {
-				value := strings.TrimSpace(origPart[idx+4:])
-				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
-					hint.Exact = value[1 : len(value)-1]
-					return hint // Exact match takes precedence
-				}
-			}
-		}
-
-		// Check for PartitionKey ge 'value' or PartitionKey gt 'value'
-		if strings.HasPrefix(part, "partitionkey ge ") || strings.HasPrefix(part, "partitionkey gt ") {
-			var idx int
-			if strings.HasPrefix(part, "partitionkey ge ") {
-				idx = findOperatorIndex(origPart, " ge ")
-			} else {
-				idx = findOperatorIndex(origPart, " gt ")
-			}
-			if idx >= 0 {
-				opLen := 4 // length of " ge " or " gt "
-				value := strings.TrimSpace(origPart[idx+opLen:])
-				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
-					hint.RangeStart = value[1 : len(value)-1]
-					hint.UseRange = true
-				}
-			}
-		}
-
-		// Check for PartitionKey le 'value' or PartitionKey lt 'value'
-		if strings.HasPrefix(part, "partitionkey le ") || strings.HasPrefix(part, "partitionkey lt ") {
-			var idx int
-			if strings.HasPrefix(part, "partitionkey le ") {
-				idx = findOperatorIndex(origPart, " le ")
-			} else {
-				idx = findOperatorIndex(origPart, " lt ")
-			}
-			if idx >= 0 {
-				opLen := 4 // length of " le " or " lt "
-				value := strings.TrimSpace(origPart[idx+opLen:])
-				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
-					hint.RangeEnd = value[1 : len(value)-1]
-					hint.UseRange = true
-				}
-			}
-		}
-	}
-
-	return hint
+	return extractKeyRangeHint(filter, "partitionkey")
 }
 
-// extractRowKeyHint extracts detailed RowKey filter information
+// extractRowKeyHint extracts detailed RowKey filter information.
 func extractRowKeyHint(filter string) RowKeyHint {
-	hint := RowKeyHint{}
+	return extractKeyRangeHint(filter, "rowkey")
+}
+
+func extractKeyRangeHint(filter, keyPrefix string) keyRangeHint {
+	hint := keyRangeHint{}
 
 	if filter == "" {
 		return hint
@@ -480,36 +416,33 @@ func extractRowKeyHint(filter string) RowKeyHint {
 
 	filter = strings.TrimSpace(filter)
 
-	// Look for RowKey patterns
 	parts := strings.Split(strings.ToLower(filter), " and ")
-	originalParts := splitPreservingCase(filter, " and ")
+	originalParts := splitPreservingCase(filter)
 
 	for i, part := range parts {
 		part = strings.TrimSpace(part)
 		origPart := strings.TrimSpace(originalParts[i])
 
-		// Check for RowKey eq 'value'
-		if strings.HasPrefix(part, "rowkey eq ") {
+		if strings.HasPrefix(part, keyPrefix+" eq ") {
 			idx := findOperatorIndex(origPart, " eq ")
 			if idx >= 0 {
 				value := strings.TrimSpace(origPart[idx+4:])
 				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
 					hint.Exact = value[1 : len(value)-1]
-					return hint // Exact match takes precedence
+					return hint
 				}
 			}
 		}
 
-		// Check for RowKey ge 'value' or RowKey gt 'value'
-		if strings.HasPrefix(part, "rowkey ge ") || strings.HasPrefix(part, "rowkey gt ") {
+		if strings.HasPrefix(part, keyPrefix+" ge ") || strings.HasPrefix(part, keyPrefix+" gt ") {
 			var idx int
-			if strings.HasPrefix(part, "rowkey ge ") {
+			if strings.HasPrefix(part, keyPrefix+" ge ") {
 				idx = findOperatorIndex(origPart, " ge ")
 			} else {
 				idx = findOperatorIndex(origPart, " gt ")
 			}
 			if idx >= 0 {
-				opLen := 4 // length of " ge " or " gt "
+				opLen := 4
 				value := strings.TrimSpace(origPart[idx+opLen:])
 				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
 					hint.RangeStart = value[1 : len(value)-1]
@@ -518,16 +451,15 @@ func extractRowKeyHint(filter string) RowKeyHint {
 			}
 		}
 
-		// Check for RowKey le 'value' or RowKey lt 'value'
-		if strings.HasPrefix(part, "rowkey le ") || strings.HasPrefix(part, "rowkey lt ") {
+		if strings.HasPrefix(part, keyPrefix+" le ") || strings.HasPrefix(part, keyPrefix+" lt ") {
 			var idx int
-			if strings.HasPrefix(part, "rowkey le ") {
+			if strings.HasPrefix(part, keyPrefix+" le ") {
 				idx = findOperatorIndex(origPart, " le ")
 			} else {
 				idx = findOperatorIndex(origPart, " lt ")
 			}
 			if idx >= 0 {
-				opLen := 4 // length of " le " or " lt "
+				opLen := 4
 				value := strings.TrimSpace(origPart[idx+opLen:])
 				if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") {
 					hint.RangeEnd = value[1 : len(value)-1]
@@ -540,8 +472,9 @@ func extractRowKeyHint(filter string) RowKeyHint {
 	return hint
 }
 
-// splitPreservingCase splits a string by separator (case-insensitive) while preserving original case
-func splitPreservingCase(s, sep string) []string {
+// splitPreservingCase splits a string by " and " (case-insensitive) while preserving original case.
+func splitPreservingCase(s string) []string {
+	const sep = " and "
 	lowerS := strings.ToLower(s)
 	lowerSep := strings.ToLower(sep)
 

@@ -1,4 +1,4 @@
-package test
+﻿package test
 
 import (
 	"context"
@@ -27,6 +27,14 @@ func newQueueClient(t *testing.T, queueName string) *azqueue.QueueClient {
 	return service.NewQueueClient(queueName)
 }
 
+func deleteTestQueue(ctx context.Context, t *testing.T, qClient *azqueue.QueueClient) {
+	t.Helper()
+	_, err := qClient.Delete(ctx, nil)
+	if err != nil {
+		t.Logf("queue delete: %v", err)
+	}
+}
+
 // ============================================================================
 // ShouldCreateQueueGivenValidNameWhenCallingCreateQueue
 // ============================================================================
@@ -45,7 +53,7 @@ func TestShouldCreateQueueGivenValidNameWhenCallingCreateQueue(t *testing.T) {
 	require.NoError(t, err, "Assert: Create returned error")
 
 	// Cleanup
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 }
 
 // ============================================================================
@@ -59,7 +67,7 @@ func TestShouldEnqueueMessageGivenExistingQueueWhenCallingEnqueue(t *testing.T) 
 
 	qClient := service.NewQueueClient("enqueue-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	msg := "hello queue"
 
@@ -82,7 +90,7 @@ func TestShouldDequeueMessageGivenExistingQueueWhenCallingDequeue(t *testing.T) 
 
 	qClient := service.NewQueueClient("dequeue-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	_, err = qClient.EnqueueMessage(ctx, "dequeue-message", nil)
 	require.NoError(t, err)
@@ -111,19 +119,19 @@ func TestShouldRespectVisibilityTimeoutGivenMessageDequeuedWhenCallingDequeueAga
 
 	qClient := service.NewQueueClient("visibility-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	_, err = qClient.EnqueueMessage(ctx, "vis-msg", nil)
 	require.NoError(t, err)
 
-	// Act — first dequeue (sets visibility timeout)
+	// Act â€” first dequeue (sets visibility timeout)
 	first, err := qClient.DequeueMessages(ctx, &azqueue.DequeueMessagesOptions{
 		VisibilityTimeout: func() *int32 { v := int32(3); return &v }(), // seconds
 	})
 	require.NoError(t, err)
 	require.Len(t, first.Messages, 1, "Assert: first dequeue should return a message")
 
-	// Act — second immediate dequeue should return *zero* messages
+	// Act â€” second immediate dequeue should return *zero* messages
 	second, err := qClient.DequeueMessages(ctx, nil)
 	require.NoError(t, err)
 
@@ -133,7 +141,7 @@ func TestShouldRespectVisibilityTimeoutGivenMessageDequeuedWhenCallingDequeueAga
 	// Wait for visibility timeout to expire
 	time.Sleep(3 * time.Second)
 
-	// Act — third dequeue should reveal the message again
+	// Act â€” third dequeue should reveal the message again
 	third, err := qClient.DequeueMessages(ctx, nil)
 	require.NoError(t, err)
 
@@ -152,7 +160,7 @@ func TestShouldDeleteMessageGivenValidPopReceiptWhenCallingDeleteMessage(t *test
 
 	qClient := service.NewQueueClient("delete-msg-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	enqueueResp, err := qClient.EnqueueMessage(ctx, "delete-me", nil)
 	require.NoError(t, err)
@@ -187,7 +195,7 @@ func TestShouldClearMessagesGivenQueueWithMessagesWhenCallingClear(t *testing.T)
 
 	qClient := service.NewQueueClient("clear-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add multiple messages
 	for i := 0; i < 3; i++ {
@@ -214,7 +222,7 @@ func TestShouldPeekMessageGivenExistingMessageWhenCallingPeekMessages(t *testing
 	ctx := context.Background()
 	qClient := newQueueClient(t, "peek-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add message
 	_, err := qClient.EnqueueMessage(ctx, "peek-me", nil)
@@ -236,7 +244,7 @@ func TestShouldPeekMultipleMessagesGivenQueueWithManyMessagesWhenCallingPeekMess
 	ctx := context.Background()
 	qClient := newQueueClient(t, "peek-multi")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add multiple messages
 	for i := 0; i < 5; i++ {
@@ -260,7 +268,7 @@ func TestShouldUpdateMessageGivenValidPopReceiptWhenCallingUpdateMessage(t *test
 	ctx := context.Background()
 	qClient := newQueueClient(t, "update-msg")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add and dequeue message
 	_, _ = qClient.EnqueueMessage(ctx, "original", nil)
@@ -294,7 +302,7 @@ func TestShouldSetQueueMetadataGivenExistingQueueWhenCallingSetMetadata(t *testi
 	ctx := context.Background()
 	qClient := newQueueClient(t, "queue-meta")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Set metadata
 	metadata := map[string]*string{
@@ -328,7 +336,7 @@ func TestShouldListQueuesGivenMultipleQueuesWhenCallingListQueues(t *testing.T) 
 	for _, name := range queues {
 		qc := service.NewQueueClient(name)
 		_, _ = qc.Create(ctx, nil)
-		defer qc.Delete(ctx, nil)
+		t.Cleanup(func() { deleteTestQueue(ctx, t, qc) })
 	}
 
 	// List queues
@@ -354,7 +362,7 @@ func TestShouldListQueuesWithPrefixGivenMatchingQueuesWhenCallingListQueues(t *t
 	for _, name := range append(prefixQueues, otherQueues...) {
 		qc := service.NewQueueClient(name)
 		_, _ = qc.Create(ctx, nil)
-		defer qc.Delete(ctx, nil)
+		t.Cleanup(func() { deleteTestQueue(ctx, t, qc) })
 	}
 
 	// List with prefix
@@ -381,7 +389,7 @@ func TestShouldRespectTTLGivenExpiredMessageWhenCallingDequeue(t *testing.T) {
 	ctx := context.Background()
 	qClient := newQueueClient(t, "ttl-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add message with 1 second TTL
 	ttl := int32(1)
@@ -407,7 +415,7 @@ func TestShouldGetQueuePropertiesGivenExistingQueueWhenCallingGetProperties(t *t
 	ctx := context.Background()
 	qClient := newQueueClient(t, "props-test")
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add some messages
 	for i := 0; i < 3; i++ {
@@ -452,7 +460,7 @@ func TestShouldIncrementDequeueCountGivenMultipleDequeuedWhenCallingDequeue(t *t
 	// Ensure a clean slate so the test is deterministic
 	_, _ = qClient.Delete(ctx, nil)
 	_, _ = qClient.Create(ctx, nil)
-	defer qClient.Delete(ctx, nil)
+	t.Cleanup(func() { deleteTestQueue(ctx, t, qClient) })
 
 	// Add message
 	_, _ = qClient.EnqueueMessage(ctx, "count-me", nil)

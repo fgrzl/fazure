@@ -1,8 +1,9 @@
-package queues
+﻿package queues
 
 import (
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,19 @@ type Handler struct {
 	db  *pebble.DB
 	log *slog.Logger
 	mu  sync.Mutex // protects message dequeue operations for competing consumers
+}
+
+func closeIO(c io.Closer) error {
+	if c == nil {
+		return nil
+	}
+	return c.Close()
+}
+
+func (h *Handler) writeXML(w http.ResponseWriter, v any) {
+	if err := xml.NewEncoder(w).Encode(v); err != nil {
+		h.log.Error("failed to write XML response", "error", err)
+	}
 }
 
 // RFC1123Time wraps time.Time to marshal/unmarshal using RFC1123 format (Azure requirement)
@@ -200,14 +214,14 @@ func (h *Handler) CreateQueue(w http.ResponseWriter, r *http.Request, queue stri
 	// Check if queue already exists
 	_, closer, err := h.db.Get(key)
 	if err == nil {
-		closer.Close()
+		_ = closeIO(closer)
 		h.log.Debug("queue already exists", "queue", queue)
 		// Azure returns 204 if queue exists with same metadata
 		common.SetResponseHeaders(w, "")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err != pebble.ErrNotFound {
+	if !errors.Is(err, pebble.ErrNotFound) {
 		h.log.Error("failed to check queue existence", "queue", queue, "error", err)
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
@@ -232,7 +246,7 @@ func (h *Handler) DeleteQueue(w http.ResponseWriter, r *http.Request, queue stri
 
 	// Check if queue exists
 	_, closer, err := h.db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.log.Debug("queue not found", "queue", queue)
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
@@ -241,11 +255,18 @@ func (h *Handler) DeleteQueue(w http.ResponseWriter, r *http.Request, queue stri
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Delete queue metadata and all messages
 	batch := h.db.NewBatch()
-	batch.Delete(key, nil)
+	if err := batch.Delete(key, nil); err != nil {
+		_ = batch.Close()
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Delete all messages in queue
 	prefix := []byte(fmt.Sprintf("queues/data/%s/", queue))
@@ -257,10 +278,14 @@ func (h *Handler) DeleteQueue(w http.ResponseWriter, r *http.Request, queue stri
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	for iter.First(); iter.Valid(); iter.Next() {
-		batch.Delete(iter.Key(), nil)
+		if err := batch.Delete(iter.Key(), nil); err != nil {
+			_ = batch.Close()
+			h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
 	}
 
 	if err := batch.Commit(pebble.Sync); err != nil {
@@ -280,7 +305,7 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 
 	key := h.queueKey(queue)
 	data, closer, err := h.db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
 	}
@@ -292,7 +317,10 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 	// Make copy before closing
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Parse metadata to extract user metadata
 	var metadata map[string]interface{}
@@ -316,7 +344,7 @@ func (h *Handler) GetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	count := 0
 	for iter.First(); iter.Valid(); iter.Next() {
@@ -342,7 +370,7 @@ func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	type Queue struct {
 		Name string `xml:"Name"`
@@ -366,7 +394,7 @@ func (h *Handler) ListQueues(w http.ResponseWriter, r *http.Request) {
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(result)
+	h.writeXML(w, result)
 }
 
 // PutMessage adds a message to the queue
@@ -374,7 +402,7 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
 	_, closer, err := h.db.Get(queueKey)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.log.Debug("queue not found for message", "queue", queue)
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
@@ -383,7 +411,10 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Parse TTL from query parameter (messagettl in seconds)
 	ttl := 7 * 24 * time.Hour // Default 7 days
@@ -452,7 +483,7 @@ func (h *Handler) PutMessage(w http.ResponseWriter, r *http.Request, queue strin
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusCreated)
-	xml.NewEncoder(w).Encode(response)
+	h.writeXML(w, response)
 }
 
 // GetMessages retrieves messages from the queue
@@ -475,7 +506,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
 	_, closer, err := h.db.Get(queueKey)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
 	}
@@ -483,7 +514,10 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Lock to prevent competing consumers from dequeuing the same message
 	h.mu.Lock()
@@ -499,7 +533,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	now := time.Now().UTC()
 	var messages []Message
@@ -517,7 +551,9 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 
 		// Check if message has expired
 		if time.Time(msg.ExpirationTime).Before(now) {
-			h.db.Delete(iter.Key(), pebble.Sync)
+			if err := h.db.Delete(iter.Key(), pebble.Sync); err != nil {
+				h.log.Warn("failed to delete expired message", "error", err)
+			}
 			continue
 		}
 
@@ -528,7 +564,10 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 
 		// Save updated message
 		data, _ := xml.Marshal(msg)
-		h.db.Set(iter.Key(), data, pebble.Sync)
+		if err := h.db.Set(iter.Key(), data, pebble.Sync); err != nil {
+			h.log.Error("failed to update message visibility", "error", err)
+			continue
+		}
 
 		messages = append(messages, msg)
 	}
@@ -544,7 +583,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request, queue stri
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(response)
+	h.writeXML(w, response)
 }
 
 // DeleteMessage deletes a specific message
@@ -554,7 +593,7 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request, queue, m
 
 	// Check if message exists
 	data, closer, err := h.db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.log.Debug("message not found", "queue", queue, "messageId", messageID)
 		h.writeError(w, http.StatusNotFound, "MessageNotFound", "The specified message does not exist")
 		return
@@ -563,7 +602,7 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request, queue, m
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer closer.Close()
+	defer func() { _ = closer.Close() }()
 
 	// Verify pop receipt
 	var msg Message
@@ -594,7 +633,7 @@ func (h *Handler) ClearMessages(w http.ResponseWriter, r *http.Request, queue st
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
 	_, closer, err := h.db.Get(queueKey)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
 	}
@@ -602,7 +641,10 @@ func (h *Handler) ClearMessages(w http.ResponseWriter, r *http.Request, queue st
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Delete all messages
 	prefix := []byte(fmt.Sprintf("queues/data/%s/", queue))
@@ -614,12 +656,16 @@ func (h *Handler) ClearMessages(w http.ResponseWriter, r *http.Request, queue st
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	batch := h.db.NewBatch()
 	count := 0
 	for iter.First(); iter.Valid(); iter.Next() {
-		batch.Delete(iter.Key(), nil)
+		if err := batch.Delete(iter.Key(), nil); err != nil {
+			_ = batch.Close()
+			h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
 		count++
 	}
 
@@ -647,7 +693,7 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 	// Check if queue exists
 	queueKey := h.queueKey(queue)
 	_, closer, err := h.db.Get(queueKey)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
 	}
@@ -655,7 +701,10 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Get visible messages without modifying them
 	prefix := []byte(fmt.Sprintf("queues/data/%s/", queue))
@@ -667,7 +716,7 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	now := time.Now().UTC()
 	var messages []Message
@@ -685,7 +734,9 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 
 		// Check if message has expired
 		if time.Time(msg.ExpirationTime).Before(now) {
-			h.db.Delete(iter.Key(), pebble.Sync)
+			if err := h.db.Delete(iter.Key(), pebble.Sync); err != nil {
+				h.log.Warn("failed to delete expired message", "error", err)
+			}
 			continue
 		}
 
@@ -704,7 +755,7 @@ func (h *Handler) PeekMessages(w http.ResponseWriter, r *http.Request, queue str
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(response)
+	h.writeXML(w, response)
 }
 
 // UpdateMessage updates a message's visibility timeout and/or content
@@ -721,7 +772,7 @@ func (h *Handler) UpdateMessage(w http.ResponseWriter, r *http.Request, queue, m
 
 	// Check if message exists
 	data, closer, err := h.db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.log.Debug("message not found", "queue", queue, "messageId", messageID)
 		h.writeError(w, http.StatusNotFound, "MessageNotFound", "The specified message does not exist")
 		return
@@ -734,7 +785,10 @@ func (h *Handler) UpdateMessage(w http.ResponseWriter, r *http.Request, queue, m
 	// Make copy of data before closing
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Parse existing message
 	var msg Message
@@ -787,7 +841,7 @@ func (h *Handler) SetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 
 	// Check if queue exists
 	data, closer, err := h.db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		h.writeError(w, http.StatusNotFound, "QueueNotFound", "The specified queue does not exist")
 		return
 	}
@@ -799,7 +853,10 @@ func (h *Handler) SetQueueMetadata(w http.ResponseWriter, r *http.Request, queue
 	// Make copy before closing
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
 
 	// Parse existing metadata
 	var metadata map[string]interface{}
@@ -885,39 +942,20 @@ func (h *Handler) GetServiceProperties(w http.ResponseWriter, r *http.Request) {
 	data, closer, err := h.db.Get(key)
 
 	var props ServiceProperties
-	if err == nil {
+	switch {
+	case err == nil:
 		dataCopy := make([]byte, len(data))
 		copy(dataCopy, data)
-		closer.Close()
-		json.Unmarshal(dataCopy, &props)
-	} else if err == pebble.ErrNotFound {
-		// Return default properties
-		props = ServiceProperties{
-			Logging: &Logging{
-				Version: "1.0",
-				Delete:  false,
-				Read:    false,
-				Write:   false,
-				RetentionPolicy: &RetentionPolicy{
-					Enabled: false,
-				},
-			},
-			HourMetrics: &Metrics{
-				Version: "1.0",
-				Enabled: false,
-				RetentionPolicy: &RetentionPolicy{
-					Enabled: false,
-				},
-			},
-			MinuteMetrics: &Metrics{
-				Version: "1.0",
-				Enabled: false,
-				RetentionPolicy: &RetentionPolicy{
-					Enabled: false,
-				},
-			},
+		if closeErr := closeIO(closer); closeErr != nil {
+			h.writeError(w, http.StatusInternalServerError, "InternalError", closeErr.Error())
+			return
 		}
-	} else {
+		if unmarshalErr := json.Unmarshal(dataCopy, &props); unmarshalErr != nil {
+			props = ServiceProperties{Logging: &Logging{Version: "1.0", Delete: false, Read: false, Write: false, RetentionPolicy: &RetentionPolicy{Enabled: false}}, HourMetrics: &Metrics{Version: "1.0", Enabled: false, RetentionPolicy: &RetentionPolicy{Enabled: false}}, MinuteMetrics: &Metrics{Version: "1.0", Enabled: false, RetentionPolicy: &RetentionPolicy{Enabled: false}}}
+		}
+	case errors.Is(err, pebble.ErrNotFound):
+		props = ServiceProperties{Logging: &Logging{Version: "1.0", Delete: false, Read: false, Write: false, RetentionPolicy: &RetentionPolicy{Enabled: false}}, HourMetrics: &Metrics{Version: "1.0", Enabled: false, RetentionPolicy: &RetentionPolicy{Enabled: false}}, MinuteMetrics: &Metrics{Version: "1.0", Enabled: false, RetentionPolicy: &RetentionPolicy{Enabled: false}}}
+	default:
 		h.writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
@@ -947,7 +985,7 @@ func (h *Handler) GetServiceProperties(w http.ResponseWriter, r *http.Request) {
 	common.SetResponseHeaders(w, "")
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(response)
+	h.writeXML(w, response)
 }
 
 // SetServiceProperties sets queue service properties
@@ -985,8 +1023,10 @@ func (h *Handler) SetServiceProperties(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		dataCopy := make([]byte, len(data))
 		copy(dataCopy, data)
-		closer.Close()
-		json.Unmarshal(dataCopy, &props)
+		_ = closeIO(closer)
+		if unmarshalErr := json.Unmarshal(dataCopy, &props); unmarshalErr != nil {
+			props = ServiceProperties{}
+		}
 	}
 
 	// Update properties

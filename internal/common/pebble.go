@@ -13,7 +13,6 @@ type Store struct {
 // NewStore creates a Pebble DB using the default Pebble options.
 // Callers receive an unmodified Pebble instance without workload-specific tuning.
 func NewStore(datadir string) (*Store, error) {
-
 	opts := &pebble.Options{}
 
 	db, err := pebble.Open(datadir, opts)

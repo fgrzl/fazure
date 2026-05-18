@@ -1,4 +1,4 @@
-package test
+﻿package test
 
 import (
 	"bytes"
@@ -57,12 +57,42 @@ func newBlobClient(t *testing.T, containerName, blobName string) *blob.Client {
 	return client
 }
 
+func deleteTestContainer(ctx context.Context, t *testing.T, client *azblob.Client, name string) {
+	t.Helper()
+	_, err := client.DeleteContainer(ctx, name, nil)
+	if err != nil {
+		t.Logf("DeleteContainer(%q): %v", name, err)
+	}
+}
+
+func closeTestBody(t *testing.T, closer io.Closer) {
+	t.Helper()
+	if err := closer.Close(); err != nil {
+		t.Logf("body close: %v", err)
+	}
+}
+
+func releaseTestBlobLease(ctx context.Context, t *testing.T, leaseClient *lease.BlobClient) {
+	t.Helper()
+	_, err := leaseClient.ReleaseLease(ctx, nil)
+	if err != nil {
+		t.Logf("ReleaseLease: %v", err)
+	}
+}
+
+func releaseTestContainerLease(ctx context.Context, t *testing.T, leaseClient *lease.ContainerClient) {
+	t.Helper()
+	_, err := leaseClient.ReleaseLease(ctx, nil)
+	if err != nil {
+		t.Logf("ReleaseLease: %v", err)
+	}
+}
+
 // ============================================================================
 // Container Tests
 // ============================================================================
 
 func TestShouldCreateContainerGivenValidNameWhenCallingCreateContainer(t *testing.T) {
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-container-create"
@@ -71,11 +101,10 @@ func TestShouldCreateContainerGivenValidNameWhenCallingCreateContainer(t *testin
 	require.NoError(t, err, "CreateContainer should succeed")
 
 	// Cleanup
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 }
 
 func TestShouldListContainersGivenMultipleContainersWhenCallingListContainers(t *testing.T) {
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 
@@ -83,7 +112,7 @@ func TestShouldListContainersGivenMultipleContainersWhenCallingListContainers(t 
 	containers := []string{"list-test-1", "list-test-2", "list-test-3"}
 	for _, name := range containers {
 		_, _ = client.CreateContainer(ctx, name, nil)
-		defer client.DeleteContainer(ctx, name, nil)
+		t.Cleanup(func() { deleteTestContainer(ctx, t, client, name) })
 	}
 
 	// List containers
@@ -111,7 +140,7 @@ func TestShouldUploadBlobGivenValidBlobDataWhenCallingUploadBlob(t *testing.T) {
 	// Create container
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Upload blob
 	data := []byte("Hello, Blob Storage!")
@@ -120,7 +149,6 @@ func TestShouldUploadBlobGivenValidBlobDataWhenCallingUploadBlob(t *testing.T) {
 }
 
 func TestShouldDownloadBlobGivenExistingBlobWhenCallingDownloadBlob(t *testing.T) {
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-download"
@@ -128,7 +156,7 @@ func TestShouldDownloadBlobGivenExistingBlobWhenCallingDownloadBlob(t *testing.T
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	data := []byte("Download this content")
 	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
@@ -140,13 +168,12 @@ func TestShouldDownloadBlobGivenExistingBlobWhenCallingDownloadBlob(t *testing.T
 
 	downloaded, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	resp.Body.Close()
+	closeTestBody(t, resp.Body)
 
 	assert.Equal(t, data, downloaded, "Downloaded content should match uploaded content")
 }
 
 func TestShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob(t *testing.T) {
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-delete"
@@ -154,7 +181,7 @@ func TestShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob(t *testing.T) {
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	data := []byte("Delete me")
 	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
@@ -166,14 +193,13 @@ func TestShouldDeleteBlobGivenExistingBlobWhenCallingDeleteBlob(t *testing.T) {
 }
 
 func TestShouldListBlobsGivenMultipleBlobsWhenCallingListBlobs(t *testing.T) {
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-list-blobs"
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Upload multiple blobs
 	blobs := []string{"blob1.txt", "blob2.txt", "blob3.txt"}
@@ -195,7 +221,6 @@ func TestShouldListBlobsGivenMultipleBlobsWhenCallingListBlobs(t *testing.T) {
 }
 
 func TestShouldGetBlobPropertiesGivenExistingBlobWhenCallingGetBlobProperties(t *testing.T) {
-
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-properties"
@@ -203,7 +228,7 @@ func TestShouldGetBlobPropertiesGivenExistingBlobWhenCallingGetBlobProperties(t 
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	data := []byte("Test content")
 	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
@@ -212,7 +237,7 @@ func TestShouldGetBlobPropertiesGivenExistingBlobWhenCallingGetBlobProperties(t 
 	// Get properties
 	resp, err := client.DownloadStream(ctx, containerName, blobName, nil)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { closeTestBody(t, resp.Body) })
 
 	assert.NotNil(t, resp.ETag, "ETag should be present")
 	assert.NotNil(t, resp.LastModified, "LastModified should be present")
@@ -227,7 +252,7 @@ func TestShouldSetBlobMetadataGivenExistingBlobWhenCallingSetBlobMetadata(t *tes
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	data := []byte("Test")
 	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
@@ -264,7 +289,7 @@ func TestShouldUploadBlockBlobGivenStagedBlocksWhenCallingCommitBlockList(t *tes
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	blockClient := newBlockBlobClient(t, containerName, blobName)
 
@@ -285,7 +310,7 @@ func TestShouldUploadBlockBlobGivenStagedBlocksWhenCallingCommitBlockList(t *tes
 	// Verify content
 	resp, err := client.DownloadStream(ctx, containerName, blobName, nil)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { closeTestBody(t, resp.Body) })
 
 	downloaded, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "Hello, World!", string(downloaded))
@@ -299,7 +324,7 @@ func TestShouldReturnBlockListGivenCommittedBlobWhenCallingGetBlockList(t *testi
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	blockClient := newBlockBlobClient(t, containerName, blobName)
 
@@ -328,7 +353,7 @@ func TestShouldCopyBlobGivenExistingSourceWhenCallingStartCopyFromURL(t *testing
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Upload source blob
 	sourceData := []byte("Copy this content")
@@ -344,7 +369,7 @@ func TestShouldCopyBlobGivenExistingSourceWhenCallingStartCopyFromURL(t *testing
 	// Verify copy
 	resp, err := client.DownloadStream(ctx, containerName, "dest.txt", nil)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { closeTestBody(t, resp.Body) })
 
 	downloaded, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, sourceData, downloaded, "Copied content should match")
@@ -362,7 +387,7 @@ func TestShouldCreateSnapshotGivenExistingBlobWhenCallingCreateSnapshot(t *testi
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	_, err := client.UploadBuffer(ctx, containerName, blobName, []byte("original"), nil)
 	require.NoError(t, err)
@@ -388,7 +413,7 @@ func TestShouldAcquireLeaseGivenExistingBlobWhenCallingAcquireLease(t *testing.T
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	_, err := client.UploadBuffer(ctx, containerName, blobName, []byte("lease me"), nil)
 	require.NoError(t, err)
@@ -407,7 +432,7 @@ func TestShouldAcquireLeaseGivenExistingBlobWhenCallingAcquireLease(t *testing.T
 	assert.NotEmpty(t, *resp.LeaseID, "Lease ID should be returned")
 
 	// Release lease for cleanup
-	_, _ = leaseClient.ReleaseLease(ctx, nil)
+	releaseTestBlobLease(ctx, t, leaseClient)
 }
 
 func TestShouldPreventDeleteGivenLeasedBlobWhenCallingDeleteBlob(t *testing.T) {
@@ -418,7 +443,7 @@ func TestShouldPreventDeleteGivenLeasedBlobWhenCallingDeleteBlob(t *testing.T) {
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	_, err := client.UploadBuffer(ctx, containerName, blobName, []byte("protected"), nil)
 	require.NoError(t, err)
@@ -433,7 +458,7 @@ func TestShouldPreventDeleteGivenLeasedBlobWhenCallingDeleteBlob(t *testing.T) {
 	resp, err := leaseClient.AcquireLease(ctx, duration, nil)
 	require.NoError(t, err, "AcquireLease should succeed")
 	require.NotNil(t, resp, "Response should not be nil")
-	defer leaseClient.ReleaseLease(ctx, nil)
+	t.Cleanup(func() { releaseTestBlobLease(ctx, t, leaseClient) })
 
 	// Try to delete without lease (should fail)
 	_, err = client.DeleteBlob(ctx, containerName, blobName, nil)
@@ -452,7 +477,7 @@ func TestShouldDownloadRangeGivenValidRangeWhenCallingDownloadStream(t *testing.
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	data := []byte("0123456789ABCDEF")
 	_, err := client.UploadBuffer(ctx, containerName, blobName, data, nil)
@@ -464,7 +489,7 @@ func TestShouldDownloadRangeGivenValidRangeWhenCallingDownloadStream(t *testing.
 		Range: blob.HTTPRange{Offset: 5, Count: 5},
 	})
 	require.NoError(t, err, "Range download should succeed")
-	defer resp.Body.Close()
+	t.Cleanup(func() { closeTestBody(t, resp.Body) })
 
 	downloaded, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "56789", string(downloaded), "Should get bytes 5-9")
@@ -482,7 +507,7 @@ func TestShouldSetContainerMetadataGivenExistingContainerWhenCallingSetMetadata(
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Set metadata
 	containerClient := newContainerClient(t, containerName)
@@ -511,7 +536,7 @@ func TestShouldSetContainerACLGivenValidACLWhenCallingSetAccessPolicy(t *testing
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Set public access level
 	containerClient := newContainerClient(t, containerName)
@@ -539,7 +564,7 @@ func TestShouldUploadLargeBlobGivenChunkedDataWhenCallingUploadBuffer(t *testing
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Create 5MB blob (forces chunking in SDK)
 	data := bytes.Repeat([]byte("X"), 5*1024*1024)
@@ -565,7 +590,7 @@ func TestShouldListBlobsWithPrefixGivenHierarchicalBlobsWhenCallingListBlobsHier
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Create hierarchical blobs
 	blobs := []string{
@@ -607,7 +632,7 @@ func TestShouldFailUpdateGivenStaleETagWhenCallingUploadWithIfMatch(t *testing.T
 
 	// Setup
 	_, _ = client.CreateContainer(ctx, containerName, nil)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	_, err := client.UploadBuffer(ctx, containerName, blobName, []byte("v1"), nil)
 	require.NoError(t, err)
@@ -655,7 +680,7 @@ func TestShouldCreateAppendBlobGivenValidContainerWhenCallingCreate(t *testing.T
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Act
 	appendClient := newAppendBlobClient(t, containerName, blobName)
@@ -680,7 +705,7 @@ func TestShouldAppendBlockGivenExistingAppendBlobWhenCallingAppendBlock(t *testi
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	appendClient := newAppendBlobClient(t, containerName, blobName)
 	_, err = appendClient.Create(ctx, nil)
@@ -702,7 +727,7 @@ func TestShouldAppendBlockGivenExistingAppendBlobWhenCallingAppendBlock(t *testi
 	require.NoError(t, err)
 	downloaded, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	resp.Body.Close()
+	closeTestBody(t, resp.Body)
 
 	assert.Equal(t, "Hello, World!", string(downloaded))
 }
@@ -716,7 +741,7 @@ func TestShouldTrackAppendPositionGivenMultipleAppendsWhenCallingAppendBlock(t *
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	appendClient := newAppendBlobClient(t, containerName, blobName)
 	_, err = appendClient.Create(ctx, nil)
@@ -744,9 +769,9 @@ func TestShouldTrackAppendPositionGivenMultipleAppendsWhenCallingAppendBlock(t *
 // HIGH PRIORITY: Page Blob Tests
 // ============================================================================
 
-func newPageBlobClient(t *testing.T, containerName, blobName string) *pageblob.Client {
+func newPageBlobClient(t *testing.T, containerName string) *pageblob.Client {
 	client, err := pageblob.NewClientWithNoCredential(
-		blobEmulatorURL+"/"+blobAccountName+"/"+containerName+"/"+blobName, nil,
+		blobEmulatorURL+"/"+blobAccountName+"/"+containerName+"/page.vhd", nil,
 	)
 	require.NoError(t, err)
 	return client
@@ -761,10 +786,10 @@ func TestShouldCreatePageBlobGivenValidSizeWhenCallingCreate(t *testing.T) {
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Act - Create page blob with 1MB size (must be multiple of 512)
-	pageClient := newPageBlobClient(t, containerName, blobName)
+	pageClient := newPageBlobClient(t, containerName)
 	size := int64(1024 * 1024) // 1MB
 	_, err = pageClient.Create(ctx, size, nil)
 
@@ -788,9 +813,9 @@ func TestShouldUploadPagesGivenValidRangeWhenCallingUploadPages(t *testing.T) {
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
-	pageClient := newPageBlobClient(t, containerName, blobName)
+	pageClient := newPageBlobClient(t, containerName)
 	size := int64(4096) // 4KB (8 pages)
 	_, err = pageClient.Create(ctx, size, nil)
 	require.NoError(t, err)
@@ -813,7 +838,7 @@ func TestShouldUploadPagesGivenValidRangeWhenCallingUploadPages(t *testing.T) {
 	require.NoError(t, err)
 	downloaded, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	resp.Body.Close()
+	closeTestBody(t, resp.Body)
 
 	assert.Equal(t, pageData, downloaded)
 }
@@ -827,9 +852,9 @@ func TestShouldClearPagesGivenWrittenPagesWhenCallingClearPages(t *testing.T) {
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
-	pageClient := newPageBlobClient(t, containerName, blobName)
+	pageClient := newPageBlobClient(t, containerName)
 	size := int64(4096)
 	_, err = pageClient.Create(ctx, size, nil)
 	require.NoError(t, err)
@@ -856,7 +881,7 @@ func TestShouldClearPagesGivenWrittenPagesWhenCallingClearPages(t *testing.T) {
 	require.NoError(t, err)
 	downloaded, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	resp.Body.Close()
+	closeTestBody(t, resp.Body)
 
 	// All bytes should be zero
 	allZero := true
@@ -878,9 +903,9 @@ func TestShouldResizePageBlobGivenNewSizeWhenCallingResize(t *testing.T) {
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
-	pageClient := newPageBlobClient(t, containerName, blobName)
+	pageClient := newPageBlobClient(t, containerName)
 	_, err = pageClient.Create(ctx, 4096, nil)
 	require.NoError(t, err)
 
@@ -901,14 +926,13 @@ func TestShouldGetPageRangesGivenWrittenPagesWhenCallingGetPageRanges(t *testing
 	ctx := context.Background()
 	client := newBlobServiceClient(t)
 	containerName := "test-pageblob-ranges"
-	blobName := "page.vhd"
 
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
-	pageClient := newPageBlobClient(t, containerName, blobName)
+	pageClient := newPageBlobClient(t, containerName)
 	_, err = pageClient.Create(ctx, 4096, nil)
 	require.NoError(t, err)
 
@@ -929,7 +953,7 @@ func TestShouldGetPageRangesGivenWrittenPagesWhenCallingGetPageRanges(t *testing
 	for pager.More() {
 		resp, err := pager.NextPage(ctx)
 		require.NoError(t, err, "GetPageRanges should succeed")
-		if len(resp.PageList.PageRange) > 0 {
+		if len(resp.PageRange) > 0 {
 			found = true
 		}
 	}
@@ -950,7 +974,7 @@ func TestShouldAcquireContainerLeaseGivenValidContainerWhenCallingAcquireLease(t
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	// Act
 	containerClient := newContainerClient(t, containerName)
@@ -965,7 +989,7 @@ func TestShouldAcquireContainerLeaseGivenValidContainerWhenCallingAcquireLease(t
 	assert.NotEmpty(t, *resp.LeaseID)
 
 	// Cleanup - release lease
-	_, _ = leaseClient.ReleaseLease(ctx, nil)
+	releaseTestContainerLease(ctx, t, leaseClient)
 }
 
 func TestShouldPreventDeleteGivenLeasedContainerWhenCallingDeleteContainer(t *testing.T) {
@@ -992,8 +1016,8 @@ func TestShouldPreventDeleteGivenLeasedContainerWhenCallingDeleteContainer(t *te
 	assert.Error(t, err, "Delete should fail when container is leased")
 
 	// Cleanup - release lease and delete
-	_, _ = leaseClient.ReleaseLease(ctx, nil)
-	_, _ = client.DeleteContainer(ctx, containerName, nil)
+	releaseTestContainerLease(ctx, t, leaseClient)
+	deleteTestContainer(ctx, t, client, containerName)
 }
 
 func TestShouldRenewContainerLeaseGivenActivLeaseWhenCallingRenewLease(t *testing.T) {
@@ -1002,7 +1026,7 @@ func TestShouldRenewContainerLeaseGivenActivLeaseWhenCallingRenewLease(t *testin
 	containerName := "test-container-lease-renew"
 
 	// Cleanup first in case container exists from a previous run
-	client.DeleteContainer(ctx, containerName, nil)
+	deleteTestContainer(ctx, t, client, containerName)
 
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
@@ -1010,8 +1034,8 @@ func TestShouldRenewContainerLeaseGivenActivLeaseWhenCallingRenewLease(t *testin
 	defer func() {
 		containerClient := newContainerClient(t, containerName)
 		leaseClient, _ := lease.NewContainerClient(containerClient, nil)
-		leaseClient.ReleaseLease(ctx, nil)
-		client.DeleteContainer(ctx, containerName, nil)
+		releaseTestContainerLease(ctx, t, leaseClient)
+		deleteTestContainer(ctx, t, client, containerName)
 	}()
 
 	containerClient := newContainerClient(t, containerName)
@@ -1037,7 +1061,7 @@ func TestShouldReleaseContainerLeaseGivenActiveLeaseWhenCallingReleaseLease(t *t
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	containerClient := newContainerClient(t, containerName)
 	leaseClient, err := lease.NewContainerClient(containerClient, nil)
@@ -1066,7 +1090,7 @@ func TestShouldBreakContainerLeaseGivenActiveLeaseWhenCallingBreakLease(t *testi
 	// Setup
 	_, err := client.CreateContainer(ctx, containerName, nil)
 	require.NoError(t, err)
-	defer client.DeleteContainer(ctx, containerName, nil)
+	t.Cleanup(func() { deleteTestContainer(ctx, t, client, containerName) })
 
 	containerClient := newContainerClient(t, containerName)
 	leaseClient, err := lease.NewContainerClient(containerClient, nil)

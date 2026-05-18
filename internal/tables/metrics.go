@@ -46,10 +46,18 @@ func (m *Metrics) ObserveQuery(q QueryMetric) {
 	}
 
 	atomic.AddUint64(&m.queriesTotal, 1)
-	atomic.AddUint64(&m.queriesReturned, uint64(q.Returned))
-	atomic.AddUint64(&m.queriesScanned, uint64(q.Scanned))
+	if q.Returned > 0 {
+		atomic.AddUint64(&m.queriesReturned, uint64(q.Returned))
+	}
+	if q.Scanned > 0 {
+		atomic.AddUint64(&m.queriesScanned, uint64(q.Scanned))
+	}
 
-	durMs := uint64(q.Duration.Milliseconds())
+	ms := q.Duration.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	durMs := uint64(ms)
 	atomic.AddUint64(&m.queriesDurationMs, durMs)
 	for {
 		prev := atomic.LoadUint64(&m.queriesMaxDurationMs)

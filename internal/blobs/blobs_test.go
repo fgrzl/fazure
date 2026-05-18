@@ -23,7 +23,8 @@ func TestShouldGenerateHashBasedBlobFilePath(t *testing.T) {
 	}
 
 	// Act
-	path := h.blobFilePath("mycontainer", "myblob")
+	path, err := h.blobFilePath("mycontainer", "myblob")
+	require.NoError(t, err)
 
 	// Assert
 	hash := sha256.Sum256([]byte("mycontainer/myblob"))
@@ -40,8 +41,10 @@ func TestShouldGenerateDifferentPathsForDifferentBlobs(t *testing.T) {
 	}
 
 	// Act
-	path1 := h.blobFilePath("container", "blob1")
-	path2 := h.blobFilePath("container", "blob2")
+	path1, err := h.blobFilePath("container", "blob1")
+	require.NoError(t, err)
+	path2, err := h.blobFilePath("container", "blob2")
+	require.NoError(t, err)
 
 	// Assert
 	assert.NotEqual(t, path1, path2)
@@ -54,8 +57,10 @@ func TestShouldGenerateSamePathForSameBlob(t *testing.T) {
 	}
 
 	// Act
-	path1 := h.blobFilePath("container", "blob")
-	path2 := h.blobFilePath("container", "blob")
+	path1, err := h.blobFilePath("container", "blob")
+	require.NoError(t, err)
+	path2, err := h.blobFilePath("container", "blob")
+	require.NoError(t, err)
 
 	// Assert
 	assert.Equal(t, path1, path2)
@@ -68,8 +73,10 @@ func TestShouldGenerateDifferentPathsForDifferentContainers(t *testing.T) {
 	}
 
 	// Act
-	path1 := h.blobFilePath("container1", "blob")
-	path2 := h.blobFilePath("container2", "blob")
+	path1, err := h.blobFilePath("container1", "blob")
+	require.NoError(t, err)
+	path2, err := h.blobFilePath("container2", "blob")
+	require.NoError(t, err)
 
 	// Assert
 	assert.NotEqual(t, path1, path2)
@@ -83,7 +90,8 @@ func TestShouldUseDataDirInFilePath(t *testing.T) {
 	}
 
 	// Act
-	path := h.blobFilePath("container", "blob")
+	path, err := h.blobFilePath("container", "blob")
+	require.NoError(t, err)
 
 	// Assert
 	// On Windows, paths use backslashes and have drive letters

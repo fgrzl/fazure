@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/fgrzl/fazure/internal/blobs"
 	"github.com/fgrzl/fazure/internal/common"
@@ -38,7 +39,6 @@ func main() {
 		logger.Error("failed to initialize storage", "path", datadir, "error", err)
 		os.Exit(1)
 	}
-	defer store.Close()
 
 	logger.Info("pebble database initialized", "path", datadir)
 
@@ -54,6 +54,9 @@ func main() {
 	tableStore, err := tables.NewTableStore(store, logger, tableMetrics)
 	if err != nil {
 		logger.Error("failed to initialize table storage", "error", err)
+		if closeErr := store.Close(); closeErr != nil {
+			logger.Error("failed to close store", "error", closeErr)
+		}
 		os.Exit(1)
 	}
 	tableHandler := tables.NewHandler(tableStore, logger)
@@ -66,7 +69,9 @@ func main() {
 	// Health check endpoints
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		if _, err := w.Write([]byte("OK")); err != nil {
+			logger.Error("health response write failed", "error", err)
+		}
 	}
 	blobMux.HandleFunc("/health", healthHandler)
 	queueMux.HandleFunc("/health", healthHandler)
@@ -76,9 +81,15 @@ func main() {
 	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(store.Metrics()))
-		w.Write([]byte("\n\n[tables]\n"))
-		w.Write([]byte(tableMetrics.String()))
+		if _, err := w.Write([]byte(store.Metrics())); err != nil {
+			logger.Error("metrics response write failed", "error", err)
+		}
+		if _, err := w.Write([]byte("\n\n[tables]\n")); err != nil {
+			logger.Error("metrics response write failed", "error", err)
+		}
+		if _, err := w.Write([]byte(tableMetrics.String())); err != nil {
+			logger.Error("metrics response write failed", "error", err)
+		}
 	}
 	tableMux.HandleFunc("/debug/metrics", metricsHandler)
 
@@ -105,21 +116,21 @@ func main() {
 	// Blob service
 	go func() {
 		logger.Info("starting blob service", "port", blobPort)
-		srv := &http.Server{Addr: ":" + blobPort, Handler: blobMux}
+		srv := &http.Server{Addr: ":" + blobPort, Handler: blobMux, ReadHeaderTimeout: 10 * time.Second}
 		errChan <- srv.ListenAndServe()
 	}()
 
 	// Queue service
 	go func() {
 		logger.Info("starting queue service", "port", queuePort)
-		srv := &http.Server{Addr: ":" + queuePort, Handler: queueMux}
+		srv := &http.Server{Addr: ":" + queuePort, Handler: queueMux, ReadHeaderTimeout: 10 * time.Second}
 		errChan <- srv.ListenAndServe()
 	}()
 
 	// Table service
 	go func() {
 		logger.Info("starting table service", "port", tablePort)
-		srv := &http.Server{Addr: ":" + tablePort, Handler: tableMux}
+		srv := &http.Server{Addr: ":" + tablePort, Handler: tableMux, ReadHeaderTimeout: 10 * time.Second}
 		errChan <- srv.ListenAndServe()
 	}()
 
@@ -133,8 +144,11 @@ func main() {
 	// Wait for any server to fail
 	if err := <-errChan; err != nil {
 		logger.Error("server error", "error", err)
-		os.Exit(1)
 	}
+	if err := store.Close(); err != nil {
+		logger.Error("failed to close store", "error", err)
+	}
+	os.Exit(1)
 }
 
 // getLogLevel parses LOG_LEVEL env var into slog.Level

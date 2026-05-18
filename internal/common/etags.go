@@ -1,7 +1,6 @@
 package common
 
 import (
-	"crypto/md5"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -11,8 +10,8 @@ import (
 // Generate creates an ETag based on timestamp
 // Azure Table Storage ETags are typically W/"datetime'<timestamp>'" format
 func Generate(t time.Time) string {
-	hash := md5.Sum([]byte(t.Format(time.RFC3339Nano)))
-	return fmt.Sprintf(`W/"%s"`, fmt.Sprintf("%x", hash))
+	hash := sha256.Sum256([]byte(t.Format(time.RFC3339Nano)))
+	return fmt.Sprintf(`W/"%x"`, hash)
 }
 
 // Validate checks if an ETag matches

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"strconv"
 )
 
 // ContinuationToken represents pagination state
@@ -36,10 +37,14 @@ func GetPaginationParams(query url.Values, defaultPageSize int) (pageSize int, c
 
 	// Azure uses different param names for different services
 	if top := query.Get("$top"); top != "" {
-		fmt.Sscanf(top, "%d", &pageSize)
+		if n, err := strconv.Atoi(top); err == nil {
+			pageSize = n
+		}
 	}
 	if maxResults := query.Get("maxresults"); maxResults != "" {
-		fmt.Sscanf(maxResults, "%d", &pageSize)
+		if n, err := strconv.Atoi(maxResults); err == nil {
+			pageSize = n
+		}
 	}
 
 	// Continuation token can be named differently

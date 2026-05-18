@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -12,6 +13,13 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/fgrzl/fazure/internal/common"
 )
+
+func closeIO(c io.Closer) error {
+	if c == nil {
+		return nil
+	}
+	return c.Close()
+}
 
 // Entity represents a table entity with metadata.
 type Entity struct {
@@ -35,8 +43,7 @@ func (e *Entity) MarshalJSON() ([]byte, error) {
 		m[k] = v
 
 		// Add type metadata for special types
-		switch val := v.(type) {
-		case time.Time:
+		if val, ok := v.(time.Time); ok {
 			m[k+"@odata.type"] = "Edm.DateTime"
 			// Format as ISO 8601
 			m[k] = val.Format(time.RFC3339Nano)
@@ -243,7 +250,7 @@ func (ts *TableStore) ListTables(ctx context.Context) ([]map[string]string, erro
 	if err != nil {
 		return nil, err
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var tables []map[string]string
 	for ok := iter.First(); ok; ok = iter.Next() {
@@ -274,7 +281,7 @@ func validateTableName(tableName string) error {
 	}
 	for i := 0; i < len(tableName); i++ {
 		c := tableName[i]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+		if (c < '0' || c > '9') && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
 			return ErrInvalidTableName
 		}
 	}
@@ -294,10 +301,10 @@ func (ts *TableStore) CreateTable(ctx context.Context, tableName string) error {
 
 	_, closer, err := db.Get(key)
 	if err == nil {
-		closer.Close()
+		_ = closeIO(closer)
 		return ErrTableExists
 	}
-	if err != pebble.ErrNotFound {
+	if !errors.Is(err, pebble.ErrNotFound) {
 		return err
 	}
 
@@ -319,13 +326,15 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	mKey := metaKey(tableName)
 
 	_, closer, err := db.Get(mKey)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		return ErrTableNotFound
 	}
 	if err != nil {
 		return err
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		return err
+	}
 
 	if err := db.Delete(mKey, pebble.NoSync); err != nil {
 		return err
@@ -341,7 +350,7 @@ func (ts *TableStore) DeleteTable(ctx context.Context, tableName string) error {
 	if err != nil {
 		return err
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	batch := db.NewBatch()
 	for ok := iter.First(); ok; ok = iter.Next() {
@@ -383,13 +392,15 @@ func (ts *TableStore) GetTable(ctx context.Context, tableName string) (*Table, e
 	key := metaKey(tableName)
 
 	_, closer, err := db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, ErrTableNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		return nil, err
+	}
 
 	logger := ts.log
 	if logger == nil {
@@ -530,10 +541,10 @@ func (t *Table) InsertEntity(ctx context.Context, partitionKey, rowKey string, p
 
 	_, closer, err := db.Get(key)
 	if err == nil {
-		closer.Close()
+		_ = closeIO(closer)
 		return nil, ErrEntityExists
 	}
-	if err != pebble.ErrNotFound {
+	if !errors.Is(err, pebble.ErrNotFound) {
 		return nil, err
 	}
 
@@ -578,7 +589,7 @@ func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*En
 	key := dataKey(t.name, partitionKey, rowKey)
 
 	data, closer, err := db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, ErrEntityNotFound
 	}
 	if err != nil {
@@ -587,7 +598,9 @@ func (t *Table) GetEntity(ctx context.Context, partitionKey, rowKey string) (*En
 
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		return nil, err
+	}
 
 	var entity Entity
 	if err := json.Unmarshal(dataCopy, &entity); err != nil {
@@ -619,7 +632,7 @@ func (t *Table) UpdateEntityWithETag(
 	key := dataKey(t.name, partitionKey, rowKey)
 
 	data, closer, err := db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, ErrEntityNotFound
 	}
 	if err != nil {
@@ -628,7 +641,9 @@ func (t *Table) UpdateEntityWithETag(
 
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		return nil, err
+	}
 
 	var entity Entity
 	if err := json.Unmarshal(dataCopy, &entity); err != nil {
@@ -702,7 +717,7 @@ func (t *Table) UpsertEntity(
 	key := dataKey(t.name, partitionKey, rowKey)
 
 	data, closer, err := db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		return t.InsertEntity(ctx, partitionKey, rowKey, properties)
 	}
 	if err != nil {
@@ -711,7 +726,9 @@ func (t *Table) UpsertEntity(
 
 	dataCopy := make([]byte, len(data))
 	copy(dataCopy, data)
-	closer.Close()
+	if err := closeIO(closer); err != nil {
+		return nil, err
+	}
 
 	var entity Entity
 	if err := json.Unmarshal(dataCopy, &entity); err != nil {
@@ -781,7 +798,7 @@ func (t *Table) DeleteEntityWithETag(ctx context.Context, partitionKey, rowKey, 
 	key := dataKey(t.name, partitionKey, rowKey)
 
 	data, closer, err := db.Get(key)
-	if err == pebble.ErrNotFound {
+	if errors.Is(err, pebble.ErrNotFound) {
 		return ErrEntityNotFound
 	}
 	if err != nil {
@@ -792,7 +809,9 @@ func (t *Table) DeleteEntityWithETag(ctx context.Context, partitionKey, rowKey, 
 	if ifMatch != "" && ifMatch != "*" {
 		dataCopy := make([]byte, len(data))
 		copy(dataCopy, data)
-		closer.Close()
+		if err := closeIO(closer); err != nil {
+			return err
+		}
 
 		var entity Entity
 		if err := json.Unmarshal(dataCopy, &entity); err != nil {
@@ -802,8 +821,8 @@ func (t *Table) DeleteEntityWithETag(ctx context.Context, partitionKey, rowKey, 
 		if entity.ETag != ifMatch {
 			return ErrPreconditionFailed
 		}
-	} else {
-		closer.Close()
+	} else if err := closeIO(closer); err != nil {
+		return err
 	}
 
 	return db.Delete(key, pebble.NoSync)
@@ -822,7 +841,7 @@ func (t *Table) ListEntities(ctx context.Context) ([]*Entity, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 
 	var entities []*Entity
 	for ok := iter.First(); ok; ok = iter.Next() {
@@ -886,7 +905,7 @@ func (t *Table) QueryEntities(
 		}
 		if _, testErr := MatchesFilter(filter, testEntity); testErr != nil {
 			err = testErr
-			return
+			return entities, contPK, contRK, err
 		}
 	}
 
@@ -971,9 +990,9 @@ func (t *Table) QueryEntities(
 	})
 	if newIterErr != nil {
 		err = newIterErr
-		return
+		return entities, contPK, contRK, err
 	}
-	defer iter.Close()
+	defer func() { _ = iter.Close() }()
 	t.log.Debug("iterator created",
 		"elapsed", time.Since(iterStart),
 		"pkHint", pkHint,
@@ -1021,7 +1040,7 @@ func (t *Table) QueryEntities(
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
-			return
+			return entities, contPK, contRK, err
 		default:
 		}
 
@@ -1052,7 +1071,7 @@ func (t *Table) QueryEntities(
 					t.log.Debug("invalid filter during evaluation", "filter", filter, "error", matchErr)
 				}
 				err = matchErr
-				return
+				return entities, contPK, contRK, err
 			}
 			if !match {
 				continue
@@ -1071,11 +1090,11 @@ func (t *Table) QueryEntities(
 			}
 
 			logCompletion(hasMore)
-			return
+			return entities, contPK, contRK, err
 		}
 	}
 
 	logCompletion(false)
 	err = iter.Error()
-	return
+	return entities, contPK, contRK, err
 }

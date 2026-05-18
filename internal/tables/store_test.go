@@ -31,8 +31,12 @@ func setupTestStore(t *testing.T) (*TableStore, func()) {
 	require.NoError(t, err)
 
 	cleanup := func() {
-		store.Close()
-		os.RemoveAll(dir)
+		if err := store.Close(); err != nil {
+			t.Logf("store.Close: %v", err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("os.RemoveAll: %v", err)
+		}
 	}
 
 	return tableStore, cleanup
@@ -657,7 +661,10 @@ func TestShouldReturnErrorGivenUnsupportedFilter(t *testing.T) {
 	require.NoError(t, err)
 
 	// Act
-	_, _, _, err = table.QueryEntities(ctx, "contains(Name,'Alice')", 0, nil, "", "")
+	entities, contPK, contRK, err := table.QueryEntities(ctx, "contains(Name,'Alice')", 0, nil, "", "")
+	_ = entities
+	_ = contPK
+	_ = contRK
 
 	// Assert
 	require.ErrorIs(t, err, ErrInvalidFilter)
