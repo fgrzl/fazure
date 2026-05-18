@@ -82,13 +82,7 @@ The compose file maps the standard Azure emulator ports to the host:
 - Queue: `10001`
 - Table: `10002`
 
-By default the container uses the OS temporary directory for storage unless you set `DATA_DIR` (see Configuration). To persist data between restarts, enable a volume mount in `compose.yml` or run with:
-
-```powershell
-docker compose up -d
-# or override DATA_DIR
-DATA_DIR=./data docker compose up -d
-```
+This repository's `compose.yml` sets `DATA_DIR=/data` with a named volume, so data **persists across restarts** when you use `docker compose up`. For ad-hoc `docker run` without `DATA_DIR`, storage defaults to the OS temp directory.
 
 You can check service health with:
 
@@ -118,13 +112,12 @@ go build -o bin/fazure ./cmd
 
 ## ⚙️ Configuration
 
-| Variable     | Default                                    | Description                                                                                                                       |
-| ------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `DATA_DIR`   | (not set) → OS temp dir (e.g. `/tmp/data`) | Data directory for persistent storage. If you want persistent data across restarts, set this to a host directory (e.g. `./data`). |
-| `BLOB_PORT`  | `10000`                                    | Blob service port                                                                                                                 |
-| `QUEUE_PORT` | `10001`                                    | Queue service port                                                                                                                |
-| `TABLE_PORT` | `10002`                                    | Table service port                                                                                                                |
-| `LOG_LEVEL`  | `info`                                     | Logger level: `debug`, `info`, `warn`, `error`                                                                                    |
+| Variable    | Default                         | Description                                                                 |
+| ----------- | ------------------------------- | --------------------------------------------------------------------------- |
+| `DATA_DIR`  | (unset) → `{TempDir}/data`      | Pebble data directory. Set explicitly for persistence outside compose.      |
+| `LOG_LEVEL` | `info`                          | `debug`, `info`, `warn`, or `error`                                         |
+
+Ports **10000** (blob), **10001** (queue), and **10002** (table) are fixed in code. See [docs/configuration.md](docs/configuration.md).
 
 ## 🔗 Connection String
 
@@ -159,8 +152,7 @@ The table below shows implemented features and current gaps. Checkmarks indicate
 - ✅ Batch transactions with upsert semantics for PUT/PATCH/MERGE
 - ✅ OData query support ($filter, $select) and pagination
 - ✅ ETag concurrency checks (If-Match handling)
-- ✅ Shared Key authentication
-- ✅ SAS token validation (partial)
+- ❌ Shared Key / SAS enforcement (clients may send signed requests; emulator does not validate)
 - ✅ Docker support and multi-arch builds (via GitHub Actions)
 
 Planned / missing items:
