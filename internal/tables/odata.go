@@ -33,17 +33,150 @@ func ParseODataQuery(filterStr, selectStr string, top int) *ODataQuery {
 // MatchesFilter checks if an entity matches the OData filter.
 // Returns ErrInvalidFilter when the filter expression is unsupported or malformed,
 // mirroring Azure Tables behavior of rejecting invalid $filter values.
+//
+// MatchesFilter compiles the filter and evaluates it once. To evaluate the same filter
+// against many entities (e.g. a table or partition scan), compile it once with
+// CompileFilter and reuse the *CompiledFilter — that avoids re-parsing the filter
+// string for every row, which is the dominant cost of a large scan.
 func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
-	if filter == "" {
+	compiled, err := CompileFilter(filter)
+	if err != nil {
+		return false, err
+	}
+	return compiled.Match(entity)
+}
+
+// CompiledFilter is a parsed OData $filter expression that can be evaluated against
+// many entities without re-parsing the filter string each time.
+type CompiledFilter struct {
+	root filterNode
+}
+
+// filterNode is a node in the compiled filter tree. get returns the value for a field
+// ("PartitionKey", "RowKey", or a property name) and whether that field exists.
+type filterNode interface {
+	match(get func(field string) (interface{}, bool)) (bool, error)
+}
+
+// CompileFilter parses an OData $filter string into a reusable CompiledFilter.
+// An empty filter compiles to a matcher that accepts every entity. Syntax validation
+// happens here, once, rather than per entity.
+func CompileFilter(filter string) (*CompiledFilter, error) {
+	root, err := compileFilterExpr(filter)
+	if err != nil {
+		return nil, err
+	}
+	return &CompiledFilter{root: root}, nil
+}
+
+// Match evaluates the compiled filter against an entity map.
+func (c *CompiledFilter) Match(entity map[string]interface{}) (bool, error) {
+	return c.MatchGetter(func(field string) (interface{}, bool) {
+		v, ok := entity[field]
+		return v, ok
+	})
+}
+
+// MatchGetter evaluates the compiled filter using a field accessor, letting callers
+// avoid materializing a map per entity (e.g. scanning Entity structs directly).
+func (c *CompiledFilter) MatchGetter(get func(field string) (interface{}, bool)) (bool, error) {
+	if c == nil || c.root == nil {
 		return true, nil
 	}
+	return c.root.match(get)
+}
 
-	// Simplified filter parser - handles basic equality and logical operators
+// coveredByPartitionPrefix reports whether the filter is exactly a single
+// "PartitionKey eq '<value>'" comparison. When true, an iterator already bounded to that
+// partition's key prefix returns precisely the matching rows, so per-row filter
+// evaluation can be skipped. It deliberately returns false for any compound expression
+// (anything with additional predicates), so the skip is only taken when provably safe.
+func (c *CompiledFilter) coveredByPartitionPrefix() bool {
+	if c == nil {
+		return false
+	}
+	cmp, ok := c.root.(*comparisonNode)
+	if !ok {
+		return false
+	}
+	return cmp.field == "PartitionKey" && cmp.op == "eq"
+}
+
+// alwaysTrueNode matches every entity (empty filter).
+type alwaysTrueNode struct{}
+
+func (alwaysTrueNode) match(func(string) (interface{}, bool)) (bool, error) { return true, nil }
+
+// andNode short-circuits: if the left side is false (or errors), the right side is not evaluated.
+type andNode struct{ left, right filterNode }
+
+func (n *andNode) match(get func(string) (interface{}, bool)) (bool, error) {
+	l, err := n.left.match(get)
+	if err != nil {
+		return false, err
+	}
+	if !l {
+		return false, nil
+	}
+	return n.right.match(get)
+}
+
+// orNode short-circuits: if the left side is true (or errors), the right side is not evaluated.
+type orNode struct{ left, right filterNode }
+
+func (n *orNode) match(get func(string) (interface{}, bool)) (bool, error) {
+	l, err := n.left.match(get)
+	if err != nil {
+		return false, err
+	}
+	if l {
+		return true, nil
+	}
+	return n.right.match(get)
+}
+
+// comparisonNode evaluates "<field> <op> <value>" with the right-hand value parsed once
+// at compile time.
+type comparisonNode struct {
+	field string
+	op    string
+	right interface{}
+	cmp   func(left, right interface{}) bool
+}
+
+func (n *comparisonNode) match(get func(string) (interface{}, bool)) (bool, error) {
+	val, ok := get(n.field)
+	if !ok {
+		return false, nil
+	}
+	return n.cmp(val, n.right), nil
+}
+
+// startsWithNode evaluates "startswith(<property>, '<prefix>')".
+type startsWithNode struct {
+	property string
+	prefix   string
+}
+
+func (n *startsWithNode) match(get func(string) (interface{}, bool)) (bool, error) {
+	val, ok := get(n.property)
+	if !ok {
+		return false, nil
+	}
+	return strings.HasPrefix(fmt.Sprintf("%v", val), n.prefix), nil
+}
+
+// compileFilterExpr mirrors the precedence of the original recursive evaluator:
+// fully-enclosing parentheses, then 'and', then 'or', then a simple comparison/function.
+func compileFilterExpr(filter string) (filterNode, error) {
+	if filter == "" {
+		return alwaysTrueNode{}, nil
+	}
+
 	filter = strings.TrimSpace(filter)
 
-	// Strip surrounding parentheses if they enclose the whole expression
+	// Strip surrounding parentheses if they enclose the whole expression.
 	if strings.HasPrefix(filter, "(") && strings.HasSuffix(filter, ")") {
-		// check balance
 		depth := 0
 		balanced := true
 		for i := 0; i < len(filter); i++ {
@@ -59,41 +192,35 @@ func MatchesFilter(filter string, entity map[string]interface{}) (bool, error) {
 			}
 		}
 		if balanced {
-			return MatchesFilter(strings.TrimSpace(filter[1:len(filter)-1]), entity)
+			return compileFilterExpr(strings.TrimSpace(filter[1 : len(filter)-1]))
 		}
 	}
 
-	// Handle 'and' operator (case insensitive)
-	andIndex := findOperatorIndex(filter, " and ")
-	if andIndex >= 0 {
-		left := strings.TrimSpace(filter[:andIndex])
-		right := strings.TrimSpace(filter[andIndex+5:])
-		l, err := MatchesFilter(left, entity)
+	if andIndex := findOperatorIndex(filter, " and "); andIndex >= 0 {
+		left, err := compileFilterExpr(strings.TrimSpace(filter[:andIndex]))
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if !l {
-			return false, nil
-		}
-		return MatchesFilter(right, entity)
-	}
-
-	// Handle 'or' operator (case insensitive)
-	orIndex := findOperatorIndex(filter, " or ")
-	if orIndex >= 0 {
-		left := strings.TrimSpace(filter[:orIndex])
-		right := strings.TrimSpace(filter[orIndex+4:])
-		l, err := MatchesFilter(left, entity)
+		right, err := compileFilterExpr(strings.TrimSpace(filter[andIndex+5:]))
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if l {
-			return true, nil
-		}
-		return MatchesFilter(right, entity)
+		return &andNode{left: left, right: right}, nil
 	}
 
-	return evaluateSimpleFilter(filter, entity)
+	if orIndex := findOperatorIndex(filter, " or "); orIndex >= 0 {
+		left, err := compileFilterExpr(strings.TrimSpace(filter[:orIndex]))
+		if err != nil {
+			return nil, err
+		}
+		right, err := compileFilterExpr(strings.TrimSpace(filter[orIndex+4:]))
+		if err != nil {
+			return nil, err
+		}
+		return &orNode{left: left, right: right}, nil
+	}
+
+	return compileSimpleFilter(filter)
 }
 
 // findOperatorIndex finds the index of an operator (case insensitive)
@@ -138,18 +265,20 @@ func isSeparator(c byte) bool {
 	return c == ' ' || c == '(' || c == ')'
 }
 
-// evaluateSimpleFilter evaluates a single filter expression.
-// Returns ErrInvalidFilter when no supported operator is found.
-func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, error) {
+// compileSimpleFilter compiles a single comparison or supported function expression.
+// Returns ErrInvalidFilter when no supported operator/function is found.
+func compileSimpleFilter(filter string) (filterNode, error) {
 	filter = strings.TrimSpace(filter)
 
-	// Handle supported OData string functions
-	// Example: startswith(Name, 'Al')
-	if ok, matched, err := evaluateStringFunctionFilter(filter, entity); ok {
-		return matched, err
+	// Handle supported OData string functions, e.g. startswith(Name, 'Al').
+	if node, ok, err := compileStringFunctionFilter(filter); ok {
+		if err != nil {
+			return nil, err
+		}
+		return node, nil
 	}
 
-	// Handle comparison operators: eq, ne, lt, le, gt, ge
+	// Handle comparison operators: eq, ne, lt, le, gt, ge.
 	operators := []struct {
 		op   string
 		eval func(left, right interface{}) bool
@@ -170,10 +299,10 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 
 			// Validate left and right are not empty
 			if left == "" || rightStr == "" {
-				return false, fmt.Errorf("incomplete filter expression: %q: %w", filter, ErrInvalidFilter)
+				return nil, fmt.Errorf("incomplete filter expression: %q: %w", filter, ErrInvalidFilter)
 			}
 
-			// Parse the right-side value
+			// Parse the right-side value once, at compile time.
 			var right interface{}
 			if strings.HasPrefix(rightStr, "'") && strings.HasSuffix(rightStr, "'") {
 				// Quoted string - remove quotes
@@ -183,56 +312,49 @@ func evaluateSimpleFilter(filter string, entity map[string]interface{}) (bool, e
 				right = parseFilterValue(rightStr)
 			}
 
-			val, ok := entity[left]
-			if !ok {
-				return false, nil
-			}
-
-			return op.eval(val, right), nil
+			return &comparisonNode{field: left, op: op.op, right: right, cmp: op.eval}, nil
 		}
 	}
 
-	return false, fmt.Errorf("unsupported or invalid filter expression: %q: %w", filter, ErrInvalidFilter)
+	return nil, fmt.Errorf("unsupported or invalid filter expression: %q: %w", filter, ErrInvalidFilter)
 }
 
-func evaluateStringFunctionFilter(filter string, entity map[string]interface{}) (ok bool, matched bool, err error) {
+// compileStringFunctionFilter compiles supported OData string functions.
+// ok reports whether the expression is a (possibly malformed) string function, mirroring
+// the original evaluator's contract so the caller can distinguish "not a function" from
+// "malformed function".
+func compileStringFunctionFilter(filter string) (node filterNode, ok bool, err error) {
 	lower := strings.ToLower(strings.TrimSpace(filter))
 	if !strings.HasPrefix(lower, "startswith(") {
-		return false, false, nil
+		return nil, false, nil
 	}
 
 	filter = strings.TrimSpace(filter)
 	if !strings.HasSuffix(filter, ")") {
-		return true, false, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
+		return nil, true, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
 	}
 
 	argsStr := strings.TrimSpace(filter[len("startswith(") : len(filter)-1])
 	args, parseErr := splitODataFunctionArgs(argsStr)
 	if parseErr != nil {
-		return true, false, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
+		return nil, true, fmt.Errorf("invalid startswith function: %q: %w", filter, ErrInvalidFilter)
 	}
 	if len(args) != 2 {
-		return true, false, fmt.Errorf("invalid startswith arguments: %q: %w", filter, ErrInvalidFilter)
+		return nil, true, fmt.Errorf("invalid startswith arguments: %q: %w", filter, ErrInvalidFilter)
 	}
 
 	property := strings.TrimSpace(args[0])
 	if property == "" {
-		return true, false, fmt.Errorf("invalid startswith property: %q: %w", filter, ErrInvalidFilter)
+		return nil, true, fmt.Errorf("invalid startswith property: %q: %w", filter, ErrInvalidFilter)
 	}
 
 	prefixLiteral := strings.TrimSpace(args[1])
 	prefix, okLit := parseSingleQuotedString(prefixLiteral)
 	if !okLit {
-		return true, false, fmt.Errorf("invalid startswith prefix: %q: %w", filter, ErrInvalidFilter)
+		return nil, true, fmt.Errorf("invalid startswith prefix: %q: %w", filter, ErrInvalidFilter)
 	}
 
-	val, okVal := entity[property]
-	if !okVal {
-		return true, false, nil
-	}
-
-	valStr := fmt.Sprintf("%v", val)
-	return true, strings.HasPrefix(valStr, prefix), nil
+	return &startsWithNode{property: property, prefix: prefix}, true, nil
 }
 
 func splitODataFunctionArgs(s string) ([]string, error) {

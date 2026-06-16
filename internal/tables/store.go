@@ -863,7 +863,7 @@ func (t *Table) ListEntities(ctx context.Context) ([]*Entity, error) {
 
 // QueryEntities queries entities with filters and pagination.
 //
-// - filter: OData-like filter string (we delegate to MatchesFilter).
+// - filter: OData-like filter string, compiled once via CompileFilter and evaluated per row.
 // - top: max number of results (0 => default 1000).
 // - selectFields: currently ignored here (projection is done in handler).
 // - nextPK/nextRK: continuation tokens (Azure-style).
@@ -895,16 +895,13 @@ func (t *Table) QueryEntities(
 		}
 	}()
 
-	// Validate filter syntax upfront before iteration
-	// This ensures we catch invalid filters even on empty tables
+	// Compile the filter once, up front. This validates the filter syntax (so invalid
+	// filters are rejected even on empty tables) and, critically, avoids re-parsing the
+	// filter string for every scanned row — the dominant CPU cost of a large scan.
+	var compiledFilter *CompiledFilter
 	if filter != "" {
-		// Test the filter with an empty entity to validate syntax
-		testEntity := map[string]interface{}{
-			"PartitionKey": "",
-			"RowKey":       "",
-		}
-		if _, testErr := MatchesFilter(filter, testEntity); testErr != nil {
-			err = testErr
+		compiledFilter, err = CompileFilter(filter)
+		if err != nil {
 			return entities, contPK, contRK, err
 		}
 	}
@@ -1005,11 +1002,28 @@ func (t *Table) QueryEntities(
 		limit = 1000
 	}
 
-	var filterFunc func(entity map[string]interface{}) (bool, error)
-	if filter != "" {
-		filterFunc = func(entity map[string]interface{}) (bool, error) {
-			return MatchesFilter(filter, entity)
+	// Decide whether per-row filter evaluation is needed. When the filter is exactly
+	// "PartitionKey eq '<value>'" and the iterator is already bounded to that partition's
+	// key prefix, every row in range matches, so we can skip per-row evaluation entirely.
+	applyFilter := compiledFilter != nil
+	if applyFilter && partitionKeyHint.Exact != "" && compiledFilter.coveredByPartitionPrefix() {
+		applyFilter = false
+		t.log.Debug("skipping per-row filter; partition prefix bounds fully cover filter",
+			"partitionKey", partitionKeyHint.Exact)
+	}
+
+	// matchEntity reads fields from the current scan entity (cur), so the compiled filter
+	// can be evaluated without allocating a map and copying every property per row.
+	var cur *Entity
+	matchEntity := func(field string) (interface{}, bool) {
+		switch field {
+		case "PartitionKey":
+			return cur.PartitionKey, true
+		case "RowKey":
+			return cur.RowKey, true
 		}
+		v, ok := cur.Properties[field]
+		return v, ok
 	}
 
 	scanStart := time.Now()
@@ -1057,15 +1071,9 @@ func (t *Table) QueryEntities(
 			continue
 		}
 
-		if filterFunc != nil {
-			entityMap := map[string]interface{}{
-				"PartitionKey": entity.PartitionKey,
-				"RowKey":       entity.RowKey,
-			}
-			for k, v := range entity.Properties {
-				entityMap[k] = v
-			}
-			match, matchErr := filterFunc(entityMap)
+		if applyFilter {
+			cur = &entity
+			match, matchErr := compiledFilter.MatchGetter(matchEntity)
 			if matchErr != nil {
 				if errors.Is(matchErr, ErrInvalidFilter) {
 					t.log.Debug("invalid filter during evaluation", "filter", filter, "error", matchErr)
